@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAW</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="transport">
+    <button id="btn-play" title="再生/一時停止 (Space)">▶</button>
+    <button id="btn-stop" title="停止">■</button>
+    <div id="time-display">0:00.0</div>
+    <label class="master-label">マスター
+      <input id="master-vol" type="range" min="0" max="1.5" step="0.01" value="1">
+    </label>
+    <div class="spacer"></div>
+    <button id="btn-add-track">＋ トラック</button>
+    <button id="btn-import">音声を読み込み</button>
+    <button id="btn-export">WAV書き出し</button>
+    <button id="btn-save">保存</button>
+    <button id="btn-open">開く</button>
+    <input type="file" id="file-input" accept="audio/*" multiple hidden>
+    <input type="file" id="project-input" accept=".json,application/json" hidden>
+  </header>
+
+  <div id="scroller">
+    <div id="content">
+      <div id="ruler-row">
+        <div id="corner">秒</div>
+        <canvas id="ruler"></canvas>
+      </div>
+      <div id="tracks"></div>
+      <div id="playhead"></div>
+    </div>
+    <div id="drop-hint">音声ファイル（WAV / MP3 / OGG）をここにドロップ</div>
+  </div>
+
+  <script src="js/state.js"></script>
+  <script src="js/plugins.js"></script>
+  <script src="js/wav.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/main.js"></script>
+  <!-- プラグイン: js/plugins/ にファイルを置き、ここに <script> を1行追加する -->
+  <script src="js/plugins/lowpass.js"></script>
+  <script src="js/plugins/delay.js"></script>
+  <script src="js/plugins/eq.js"></script>
+  <script src="js/plugins/dyneq.js"></script>
+</body>
+</html>
