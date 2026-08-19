@@ -74,7 +74,15 @@ DAW.audio = {
   async ensureLimiter() {
     this.ensureCtx();
     if (!DAW.limiter.enabled || this.limiterNode) return this.limiterNode;
-    await DAW.limiter.prepare(this.ctx);
+    if (this.limiterFailed) return null;   // 準備に失敗した環境では素通し（再生は止めない）
+    try {
+      await DAW.limiter.prepare(this.ctx);
+    } catch (e) {
+      // Worklet が読めない環境でもリミッター無しで鳴らし続ける。失敗は一度だけ記録する。
+      this.limiterFailed = true;
+      console.warn('リミッターを初期化できないため素通しで再生します:', e);
+      return null;
+    }
     if (this.limiterNode) return this.limiterNode;   // 競合して二重に作らない
     const node = DAW.limiter.create(this.ctx);
     try { this.masterGain.disconnect(this.ctx.destination); } catch (e) {}

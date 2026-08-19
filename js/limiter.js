@@ -182,9 +182,10 @@ registerProcessor('daw-limiter', DawLimiter);
   },
 
   // AudioWorklet は ctx ごとに addModule が必要。ライブ用。
+  // blob: URL は file:// で開くと AbortError になる（Chrome の制限）ので data: URL を使う。
   async prepare(ctx) {
     if (!this.modUrl) {
-      this.modUrl = URL.createObjectURL(new Blob([this.moduleSource()], { type: 'text/javascript' }));
+      this.modUrl = 'data:text/javascript;charset=utf-8,' + encodeURIComponent(this.moduleSource());
     }
     await ctx.audioWorklet.addModule(this.modUrl);
   },

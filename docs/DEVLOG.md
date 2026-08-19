@@ -328,3 +328,21 @@ PANNER の左に **3D球ビュー**（自前の透視投影）、RENDERER に **
 `test/tests-objui2.js` に 77 項目。投影の ADM 規約（az=0 が正面/az=+90 が左/el=+90 が上）を**画面座標の数値**で
 固定し、描画順は `drawSphereObject` を差し替えて**実際の呼び出し順**を記録して確認している。
 `requestAnimationFrame` は headless=new で発火しないので、rAF に依存せず更新関数を直接呼ぶこと。
+
+## Windows (Git Bash) 対応（`test/run.sh`・2026-08-20）
+
+Windows 11 + Git Bash で `bash test/run.sh` がタイムアウトしていた問題を修正。原因は3つ:
+
+1. **file:// URL のパス形式**: chrome.exe（Windows ネイティブ）は Git Bash の POSIX パス
+   `file:///c/Users/...` を `ERR_FILE_NOT_FOUND` にする。テストページが一切ロードされず、
+   収集サーバが 180 秒待ってタイムアウトしていた。→ `cygpath -m` で `file:///C:/Users/...`
+   形式に変換（`native_path()` ヘルパー。cygpath が無い Linux では無変換）。
+   `--user-data-dir` も同様に変換。
+2. **python3 が Microsoft Store のスタブ**: PATH 上の `python3` は実行すると Store 誘導で
+   失敗する（rc=49）。→ `python3` → `python` の順に実際に `-c ''` を走らせて動くものを
+   `$PYTHON` に採用。
+3. **stdout が cp932**: Windows の python は標準出力エンコーディングが cp932 になり、
+   テスト結果内の `≈` などで `UnicodeEncodeError`（表示も文字化け）。→ `PYTHONUTF8=1` を export。
+
+ほか、CHROME 未指定時に Windows 標準のインストール先（`/c/Program Files/Google/Chrome/...`）も
+探すようにした。Linux での挙動は不変。Windows 実測: 738/738 passed（約 7 秒）。

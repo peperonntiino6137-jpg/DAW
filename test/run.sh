@@ -8,6 +8,9 @@
 #
 # この環境には node / npm が無いため、テストランナーは python3 + bash +
 # google-chrome (headless) だけで完結させている。
+# Linux と Windows (Git Bash) の両方で動く。Windows 対応の要点:
+#   - python3 が Microsoft Store のスタブのことがあるため、実際に動くものを選ぶ
+#   - chrome.exe は POSIX パス (/c/Users/...) を解釈できないため cygpath で変換する
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,13 +36,41 @@ if [ -z "$CHROME" ]; then
   done
 fi
 if [ -z "$CHROME" ]; then
+  # Windows (Git Bash): PATH に無くても標準のインストール先にあれば使う
+  for c in "/c/Program Files/Google/Chrome/Application/chrome.exe" \
+           "/c/Program Files (x86)/Google/Chrome/Application/chrome.exe"; do
+    if [ -x "$c" ]; then CHROME="$c"; break; fi
+  done
+fi
+if [ -z "$CHROME" ]; then
   echo "ERROR: google-chrome / chromium が見つかりません。CHROME=... で指定してください。" >&2
   exit 2
 fi
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "ERROR: python3 が見つかりません。" >&2
+
+# Windows では python3 が Microsoft Store のスタブ（実行すると Store 誘導で失敗）
+# のことがあるため、`-c ''` を実際に走らせて動くものを採用する。
+PYTHON="${PYTHON:-}"
+if [ -z "$PYTHON" ]; then
+  for p in python3 python; do
+    if command -v "$p" >/dev/null 2>&1 && "$p" -c '' >/dev/null 2>&1; then
+      PYTHON="$p"; break
+    fi
+  done
+fi
+if [ -z "$PYTHON" ]; then
+  echo "ERROR: 動作する python3 / python が見つかりません。" >&2
   exit 2
 fi
+# Windows の python は標準出力が cp932 になり、テスト結果内の UTF-8 文字
+# （≈ など）で UnicodeEncodeError になるため、常に UTF-8 モードで動かす。
+export PYTHONUTF8=1
+
+# chrome.exe (Windows ネイティブ) は Git Bash の POSIX パス (/c/Users/... や /tmp/...)
+# を解釈できない。cygpath があるとき（= Git Bash / Cygwin）だけ C:/... 形式へ変換する。
+# Linux では cygpath が無いのでそのまま返り、従来と同じ挙動になる。
+native_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi
+}
 
 PROFILE="$(mktemp -d /tmp/daw-test-profile.XXXXXX)"
 CHROME_LOG="$(mktemp /tmp/daw-test-chrome.XXXXXX.log)"
@@ -68,7 +99,7 @@ cleanup() {
   # Chrome の子プロセスがプロファイルを掴んだままのことがあるので少し待って再試行する
   rm -rf "$PROFILE" 2>/dev/null
   if [ -d "$PROFILE" ]; then
-    python3 -c 'import time; time.sleep(0.4)' 2>/dev/null
+    "$PYTHON" -c 'import time; time.sleep(0.4)' 2>/dev/null
     rm -rf "$PROFILE" 2>/dev/null
   fi
   rm -f "$CHROME_LOG" "$COLLECT_LOG" 2>/dev/null
@@ -82,17 +113,17 @@ rm -f "$RESULT"
 # 毎回 index.html から生成する（詳細は test/build-verify.py）。
 BUILD_ARGS=(--out "$PAGE")
 [ "$BENCH" = "1" ] && BUILD_ARGS+=(--include bench.js)
-if ! python3 "$HERE/build-verify.py" "${BUILD_ARGS[@]}"; then
+if ! "$PYTHON" "$HERE/build-verify.py" "${BUILD_ARGS[@]}"; then
   echo "ERROR: テストページの生成に失敗しました。" >&2
   exit 2
 fi
 
 # --- 収集サーバ起動 -------------------------------------------------------
-python3 "$HERE/collect.py" --port "$PORT" --out "$RESULT" --timeout "$TIMEOUT" >"$COLLECT_LOG" 2>&1 &
+"$PYTHON" "$HERE/collect.py" --port "$PORT" --out "$RESULT" --timeout "$TIMEOUT" >"$COLLECT_LOG" 2>&1 &
 COLLECT_PID=$!
 
 for _ in $(seq 1 100); do
-  if python3 - "$PORT" <<'PY' 2>/dev/null
+  if "$PYTHON" - "$PORT" <<'PY' 2>/dev/null
 import socket, sys
 s = socket.socket()
 s.settimeout(0.2)
@@ -105,7 +136,7 @@ finally:
     s.close()
 PY
   then break; fi
-  python3 -c 'import time; time.sleep(0.05)'
+  "$PYTHON" -c 'import time; time.sleep(0.05)'
 done
 
 if ! kill -0 "$COLLECT_PID" 2>/dev/null; then
@@ -117,7 +148,12 @@ fi
 # --- Headless Chrome でテストページを開く ---------------------------------
 # 注意: --dump-dom / --virtual-time-budget は使わない。
 # OfflineAudioContext のレンダリング完了前に DOM がダンプされて結果が取れない。
-URL="file://$PAGE?port=$PORT"
+# URL・プロファイルは chrome.exe が読める形式に変換して渡す（Linux では無変換）。
+# Windows Chrome は file:///c/Users/... を ERR_FILE_NOT_FOUND にするため、
+# file:///C:/Users/... 形式が必須。
+PAGE_NATIVE="$(native_path "$PAGE")"
+PROFILE_NATIVE="$(native_path "$PROFILE")"
+URL="file:///${PAGE_NATIVE#/}?port=$PORT"
 START="$(date +%s.%N)"
 
 "$CHROME" \
@@ -126,7 +162,7 @@ START="$(date +%s.%N)"
   --no-sandbox \
   --autoplay-policy=no-user-gesture-required \
   --allow-file-access-from-files \
-  --user-data-dir="$PROFILE" \
+  --user-data-dir="$PROFILE_NATIVE" \
   --no-first-run \
   --no-default-browser-check \
   --disable-extensions \
@@ -143,7 +179,7 @@ wait "$COLLECT_PID"
 COLLECT_RC=$?
 COLLECT_PID=""
 END="$(date +%s.%N)"
-ELAPSED="$(python3 -c "print(f'{max(0.0, $END - $START):.1f}')")"
+ELAPSED="$("$PYTHON" -c "print(f'{max(0.0, $END - $START):.1f}')")"
 
 kill_chrome
 
@@ -155,7 +191,7 @@ if [ "$COLLECT_RC" != "0" ] || [ ! -s "$RESULT" ]; then
 fi
 
 # --- 整形表示 -------------------------------------------------------------
-python3 - "$RESULT" "$ELAPSED" <<'PY'
+"$PYTHON" - "$RESULT" "$ELAPSED" <<'PY'
 import json, sys
 
 path, elapsed = sys.argv[1], sys.argv[2]

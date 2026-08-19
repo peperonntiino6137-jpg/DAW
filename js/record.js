@@ -64,7 +64,8 @@ registerProcessor('daw-recorder', DawRecorder);
   },
 
   async prepare(ctx) {
-    if (!this.modUrl) this.modUrl = URL.createObjectURL(new Blob([this.moduleSource()], { type: 'text/javascript' }));
+    // blob: URL は file:// で AbortError になるので data: URL（limiter.js と同じ理由）
+    if (!this.modUrl) this.modUrl = 'data:text/javascript;charset=utf-8,' + encodeURIComponent(this.moduleSource());
     await ctx.audioWorklet.addModule(this.modUrl);
   },
 
