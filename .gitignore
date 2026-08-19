@@ -1,2 +1,6 @@
 # ビルド成果物（build\build-exe.ps1 で再生成できる）
 DAW.exe
+
+# テストの生成物（bash test/run.sh で再生成される）
+test/.verify.generated.html
+test/last-result.json
