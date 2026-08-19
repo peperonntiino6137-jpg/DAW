@@ -17,7 +17,7 @@
 
 3 通り:
 
-1. **DAW.exe（推奨）** — exe 1 個を渡すだけ。アプリ全ファイルを内蔵し、起動時に `%LOCALAPPDATA%\DAW\app` へ展開して Edge / Chrome のアプリモード（単独ウィンドウ）で開く。追加インストール不要
+1. **DAW.exe（推奨）** — exe 1 個を渡すだけ。アプリ全ファイルを内蔵し、起動時に `%LOCALAPPDATA%\DAW\app` へ展開して Chrome のアプリモード（単独ウィンドウ）で開く。Chrome がなければ既定ブラウザで開く
 2. フォルダごと zip して渡す（`index.html` をダブルクリック）
 3. GitHub Pages などの静的ホスティングにそのまま置く
 

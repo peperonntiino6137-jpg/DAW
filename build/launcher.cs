@@ -1,6 +1,6 @@
 // DAW 起動用ランチャー。
 // アプリの全ファイルをリソースとして内蔵し、起動時に %LOCALAPPDATA%\DAW\app へ
-// 展開してから Edge / Chrome のアプリモードで開く。exe 1 個で配布できる。
+// 展開してから Chrome のアプリモードで開く（Edge は使わない）。exe 1 個で配布できる。
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -29,8 +29,8 @@ static class Launcher
         string url = new Uri(Path.Combine(dir, "index.html")).AbsoluteUri;
         string[] browsers =
         {
-            @"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             @"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 @"Google\Chrome\Application\chrome.exe"),
         };
