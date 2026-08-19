@@ -42,13 +42,20 @@ input[type="range"] { accent-color: var(--accent); }
 #transport {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;   /* 幅が足りない環境では折り返す */
+  gap: 8px 8px;
   padding: 8px 12px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   flex: none;
 }
 #btn-play, #btn-stop { width: 40px; font-size: 14px; }
+#btn-undo, #btn-redo { width: 34px; font-size: 15px; line-height: 1; }
+#btn-loop { width: 34px; font-size: 14px; }
+#btn-loop.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+#btn-record { width: 40px; font-size: 14px; color: #ff6b6b; }
+#btn-record.on { background: #b3452e; border-color: #b3452e; color: #fff; animation: rec-blink 1s steps(2, start) infinite; }
+@keyframes rec-blink { 50% { opacity: 0.55; } }
 #time-display {
   font-family: Consolas, monospace;
   font-size: 16px;
@@ -62,6 +69,77 @@ input[type="range"] { accent-color: var(--accent); }
 .master-label { display: flex; align-items: center; gap: 6px; color: var(--dim); }
 .master-label input { width: 110px; }
 .spacer { flex: 1; }
+
+#meter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  background: #101014;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.m-bars { display: flex; flex-direction: column; gap: 2px; }
+.m-bar { width: 96px; height: 6px; background: #26262e; border-radius: 2px; overflow: hidden; }
+.m-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  /* -60dB(左) から 0dB(右) へ。上端付近は黄→赤で危険域を示す */
+  background: linear-gradient(90deg, #3fbf7f 0%, #3fbf7f 70%, #e0c93f 88%, #ff5252 100%);
+}
+#meter-db {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  color: var(--dim);
+  min-width: 46px;
+  text-align: right;
+}
+#meter-clip {
+  font-family: Consolas, monospace;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: #55555f;
+  border: 1px solid var(--border);
+}
+#meter-clip.on { background: #ff5252; border-color: #ff5252; color: #fff; }
+
+.grid-group { display: flex; align-items: center; gap: 4px; color: var(--dim); font-size: 11px; }
+.grid-group label { display: flex; align-items: center; gap: 4px; }
+.grid-group input[type="number"] {
+  width: 54px;
+  background: #101014;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 4px;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+.grid-group select {
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 11px;
+  padding: 3px;
+}
+#btn-snap, #btn-metro { padding: 4px 8px; font-size: 12px; }
+#btn-metro.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+#btn-snap.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.zoom-group { display: flex; align-items: center; gap: 4px; }
+.zoom-group button { padding: 4px 8px; font-size: 12px; }
+#zoom-label {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  color: var(--dim);
+  min-width: 40px;
+  text-align: center;
+}
 
 /* ---- timeline ---- */
 #scroller { flex: 1; overflow: auto; position: relative; }
@@ -119,6 +197,8 @@ input[type="range"] { accent-color: var(--accent); }
 }
 .t-name:hover, .t-name:focus { border-color: var(--border); background: #101014; outline: none; }
 .t-del { padding: 0 7px; font-size: 12px; line-height: 20px; }
+.t-move { padding: 0 4px; font-size: 8px; line-height: 20px; color: var(--dim); }
+.t-move:hover { color: var(--text); }
 .th-slider { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
 .th-slider input { flex: 1; min-width: 0; }
 .th-btns { display: flex; gap: 4px; align-items: center; }
@@ -192,7 +272,7 @@ input[type="range"] { accent-color: var(--accent); }
   touch-action: none;
 }
 .clip.selected { outline: 2px solid #fff; }
-.clip canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.clip canvas { position: absolute; top: 0; left: 0; height: 100%; pointer-events: none; }
 .clip .clip-name {
   position: absolute;
   top: 2px;
@@ -212,6 +292,21 @@ input[type="range"] { accent-color: var(--accent); }
 }
 .clip .h-l { left: 0; }
 .clip .h-r { right: 0; }
+.clip .f-l, .clip .f-r {
+  position: absolute;
+  top: 0;
+  width: 10px;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  border-radius: 2px;
+  cursor: ew-resize;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.clip:hover .f-l, .clip:hover .f-r, .clip.selected .f-l, .clip.selected .f-r { opacity: 1; }
+.clip .f-l { transform: translateX(-50%); }
+.clip .f-r { transform: translateX(50%); }
 .clip .clip-x {
   position: absolute;
   top: 1px;
@@ -251,3 +346,275 @@ input[type="range"] { accent-color: var(--accent); }
   pointer-events: none;
 }
 #drop-hint.hidden { display: none; }
+
+/* ---- オブジェクトベース音響（PANNER / RENDERER）---- */
+/* 下にドックが入るぶん、タイムラインは縮められるようにする。
+   flex アイテムの min-height は既定 auto（中身より縮まない）なので、
+   これが無いとドックが画面外へ押し出される。 */
+#scroller { min-height: 0; }
+
+/* タイムラインの下にドッキングする固定高の領域。中身は js/objui.js が作る。 */
+#obj-dock {
+  flex: none;
+  height: 300px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+
+#obj-tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 8px;
+  background: var(--panel2);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+.obj-tab {
+  padding: 3px 12px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--dim);
+}
+.obj-tab.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.obj-tools { display: flex; align-items: center; gap: 6px; }
+/* 枠だけ用意して機能は後日のもの。押せないことが見て分かるように薄く出す */
+.obj-frame { padding: 2px 8px; font-size: 10px; color: var(--dim); }
+#obj-cpu { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--dim); }
+#obj-mmeter { display: flex; align-items: center; gap: 4px; padding: 2px 4px; background: #101014; border: 1px solid var(--border); border-radius: 3px; }
+.om-bars { display: flex; flex-direction: column; gap: 2px; }
+.om-bar { width: 58px; height: 5px; background: #26262e; border-radius: 2px; overflow: hidden; }
+.om-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #3fbf7f 0%, #3fbf7f 70%, #e0c93f 88%, #ff5252 100%);
+}
+#obj-mdb { font-family: Consolas, monospace; font-size: 10px; color: var(--dim); min-width: 34px; text-align: right; }
+.obj-spacer { flex: 1; }
+#obj-add, #obj-del { padding: 2px 9px; font-size: 12px; line-height: 16px; }
+#obj-count {
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  padding: 3px 8px;
+  background: #101014;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  min-width: 68px;
+  text-align: center;
+}
+
+/* タブで切り替わるビュー（PANNER / RENDERER）と、常時表示の 3D 球ビューを並べる行 */
+#obj-body { flex: 1; min-height: 0; display: flex; }
+.obj-view { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.obj-view.hidden { display: none; }
+
+/* 3D 球ビュー。タブに関係なく常に左端に出す（RENDERER ではスピーカーを重ねる）。
+   狭い画面ではストリップ側を優先して縮むように flex-shrink を許可する。 */
+#obj-sphereview {
+  position: relative;
+  flex: 0 1 260px;
+  min-width: 150px;
+  border-right: 1px solid var(--border);
+}
+#obj-sphereview.wide { flex-basis: 340px; }
+#obj-sphere { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+#obj-sphere:active { cursor: grabbing; }
+
+/* トップビュー（真上から見た図）。同心円=距離、放射線=方位 */
+/* 幅は「左 +90°」ラベルが円に重ならない程度に取る */
+#obj-topview { position: relative; flex: none; width: 340px; border-right: 1px solid var(--border); }
+.obj-view-label {
+  position: absolute;
+  top: 4px;
+  left: 8px;
+  z-index: 1;
+  font-size: 10px;
+  color: var(--dim);
+  pointer-events: none;
+}
+#obj-top { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+
+/* ストリップ帯（可視ぶんだけ DOM がある）とマスターストリップ */
+#obj-strip-area { flex: 1; min-width: 0; display: flex; }
+#obj-strip-scroll { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; position: relative; }
+#obj-strips { position: relative; height: 100%; min-width: 100%; }
+
+.obj-strip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 92px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  user-select: none;
+}
+.obj-strip.selected { background: #2b2b3a; box-shadow: inset 0 0 0 1px var(--accent); }
+#obj-master { position: relative; flex: none; border-left: 2px solid var(--border); background: var(--panel2); }
+
+.os-head { display: flex; align-items: center; gap: 4px; }
+.os-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--dim); }
+.os-name {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 11px;
+  padding: 1px 2px;
+}
+.os-name:hover, .os-name:focus { border-color: var(--border); background: #101014; outline: none; }
+.os-title { font-size: 11px; color: var(--dim); letter-spacing: 1px; }
+
+.os-nums { display: flex; flex-direction: column; gap: 2px; }
+.os-num { display: flex; align-items: center; gap: 3px; font-size: 10px; color: var(--dim); }
+.os-num > span { width: 18px; flex: none; }
+.os-num input {
+  flex: 1;
+  min-width: 0;
+  background: #101014;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: Consolas, monospace;
+  font-size: 10px;
+  padding: 1px 2px;
+  text-align: right;
+}
+.os-num input:disabled { color: var(--dim); background: #1a1a20; }
+
+.os-lock { padding: 1px 4px; font-size: 10px; color: var(--dim); }
+.os-lock.lock-pos { background: #6b5a1e; border-color: #8b7526; color: #fff; }
+.os-lock.lock-all { background: #6b2e2e; border-color: #8b3a3a; color: #fff; }
+
+/* ピーク dB。白→黄→赤で危険域を示す（値は後日メーターから流し込む） */
+.os-peak {
+  font-family: Consolas, monospace;
+  font-size: 10px;
+  text-align: center;
+  padding: 1px 0;
+  background: #101014;
+  border-radius: 2px;
+  color: #e2e2ea;
+}
+.os-peak.warn { color: #e0c93f; }
+.os-peak.hot { color: #ff5252; }
+
+.os-fader {
+  /* Chrome では writing-mode で縦スライダーになる。direction:rtl で下が最小、上が最大 */
+  writing-mode: vertical-rl;
+  direction: rtl;
+  flex: 1;
+  min-height: 40px;
+  width: 100%;
+  accent-color: var(--accent);
+}
+.os-gain { font-family: Consolas, monospace; font-size: 10px; color: var(--dim); text-align: center; }
+.os-ms { display: flex; gap: 4px; justify-content: center; }
+.os-mute, .os-solo { padding: 1px 8px; font-size: 10px; }
+.os-mute.on { background: #b3452e; border-color: #b3452e; color: #fff; }
+.os-solo.on { background: #b3922e; border-color: #b3922e; color: #fff; }
+.os-limit {
+  font-family: Consolas, monospace;
+  font-size: 10px;
+  text-align: center;
+  color: var(--dim);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 0;
+}
+
+.obj-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--dim);
+  font-size: 13px;
+}
+.obj-placeholder b { font-size: 15px; letter-spacing: 2px; color: var(--text); }
+.obj-frame-row { display: flex; gap: 6px; }
+
+/* ---- RENDERER 画面（スピーカー配置 + マスターリミッター）---- */
+.obj-rend-sec {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+#obj-lim-sec { flex: 1; }
+.obj-sec-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--dim);
+}
+#obj-layouts { display: flex; gap: 6px; }
+.obj-layout-btn { padding: 3px 10px; font-size: 11px; color: var(--dim); }
+.obj-layout-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* スピーカー一覧。球ビュー上の番号と対応させる */
+#obj-spk-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  font-family: Consolas, monospace;
+  font-size: 10px;
+  color: var(--dim);
+  columns: 2;
+  column-gap: 10px;
+}
+.obj-spk-row { display: flex; gap: 5px; break-inside: avoid; }
+.obj-spk-row b { color: var(--text); font-weight: normal; min-width: 12px; text-align: right; }
+.obj-spk-row .sn { min-width: 28px; color: #9aa; }
+.obj-spk-row.lfe { opacity: 0.6; }
+
+#obj-lim-byp { padding: 1px 8px; font-size: 10px; color: var(--dim); }
+#obj-lim-byp.on { background: #b3452e; border-color: #b3452e; color: #fff; }
+#obj-lim-note { font-size: 10px; color: #5f5f6b; }
+
+/* 自作ノブ。canvas に円弧を描き、縦ドラッグで値を変える */
+#obj-knobs { display: flex; gap: 14px; flex-wrap: wrap; }
+.obj-knob {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  user-select: none;
+  touch-action: none;
+  cursor: ns-resize;
+}
+.obj-knob canvas { display: block; width: 48px; height: 48px; }
+.ok-lab { font-size: 10px; color: var(--dim); letter-spacing: 1px; }
+.ok-val { font-family: Consolas, monospace; font-size: 10px; color: var(--text); }
+.obj-knob.dragging .ok-val { color: var(--accent); }
+
+/* 出力形式（RENDERER） */
+#obj-out { display: flex; gap: 6px; flex-wrap: wrap; }
+#obj-out button {
+  padding: 4px 10px;
+  font-size: 11px;
+  background: var(--panel2);
+  color: var(--dim);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+#obj-out button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+#obj-out-note { margin-top: 6px; font-size: 10px; color: var(--dim); line-height: 1.5; }

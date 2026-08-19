@@ -7,6 +7,7 @@ window.addEventListener('DOMContentLoaded', () => {
   DAW.addTrack();
   DAW.addTrack();
   DAW.ui.renderTracks();
+  DAW.history.reset();
 
   const $ = id => document.getElementById(id);
 
@@ -16,19 +17,24 @@ window.addEventListener('DOMContentLoaded', () => {
     else await DAW.audio.play();
     DAW.ui.updatePlayButton();
   });
-  $('btn-stop').addEventListener('click', () => {
+  $('btn-stop').addEventListener('click', async () => {
+    if (DAW.record.active) await DAW.ui.toggleRecord();
     DAW.audio.stop();
     DAW.ui.updatePlayButton();
   });
+  $('btn-record').addEventListener('click', () => DAW.ui.toggleRecord());
+  $('btn-loop').addEventListener('click', () => DAW.ui.toggleLoop());
   $('master-vol').addEventListener('input', e => {
     DAW.project.masterVolume = +e.target.value;
     if (DAW.audio.ctx) DAW.audio.setMasterVolume(+e.target.value);
   });
+  $('master-vol').addEventListener('change', () => DAW.history.commit());
 
   // トラック追加
   $('btn-add-track').addEventListener('click', () => {
     DAW.addTrack();
     DAW.ui.renderTracks();
+    DAW.history.commit();
   });
 
   // 音声読み込み（各ファイルを新規トラックに、再生ヘッド位置へ配置）
@@ -51,7 +57,7 @@ window.addEventListener('DOMContentLoaded', () => {
       await DAW.wav.exportMix();
     } finally {
       btn.disabled = false;
-      btn.textContent = 'WAV書き出し';
+      DAW.ui.updateExportLabel();
     }
   });
 
@@ -67,6 +73,9 @@ window.addEventListener('DOMContentLoaded', () => {
       DAW.ui.selectedClipId = null;
       DAW.ui.renderTracks();
       DAW.ui.updatePlayButton();
+      DAW.ui.els.btnLoop.classList.toggle('on', DAW.loop.enabled);
+      DAW.ui.updateExportLabel();
+      DAW.history.reset();
     }
   });
 
@@ -86,9 +95,89 @@ window.addEventListener('DOMContentLoaded', () => {
         DAW.ui.selectedClipId = null;
         DAW.ui.renderTracks();
         DAW.audio.reschedule();
+        DAW.history.commit();
+      }
+    } else if (e.code === 'KeyL' && !e.ctrlKey && !e.metaKey) {
+      DAW.ui.toggleLoop();
+    } else if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey) {
+      DAW.ui.toggleMetronome();
+    } else if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      await DAW.ui.toggleRecord();
+    } else if (e.code === 'KeyS' && !e.ctrlKey && !e.metaKey) {
+      // 選択中のクリップを再生ヘッド位置で分割
+      if (DAW.ui.selectedClipId && DAW.splitClip(DAW.ui.selectedClipId, DAW.audio.getPos())) {
+        DAW.ui.renderTracks();
+        DAW.audio.reschedule();
+        DAW.history.commit();
+      }
+    } else if (e.code === 'KeyC' && (e.ctrlKey || e.metaKey)) {
+      if (DAW.ui.selectedClipId) DAW.copyClip(DAW.ui.selectedClipId);
+    } else if (e.code === 'KeyX' && (e.ctrlKey || e.metaKey)) {
+      if (DAW.ui.selectedClipId && DAW.copyClip(DAW.ui.selectedClipId)) {
+        DAW.removeClip(DAW.ui.selectedClipId);
+        DAW.ui.selectedClipId = null;
+        DAW.ui.renderTracks();
+        DAW.audio.reschedule();
+        DAW.history.commit();
+      }
+    } else if (e.code === 'KeyV' && (e.ctrlKey || e.metaKey)) {
+      const clip = DAW.pasteClip(DAW.audio.getPos());
+      if (clip) {
+        DAW.ui.renderTracks();
+        DAW.ui.selectClip(clip.id);
+        DAW.audio.reschedule();
+        DAW.history.commit();
+      }
+    } else if (e.code === 'KeyD' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      const copy = DAW.ui.selectedClipId && DAW.duplicateClip(DAW.ui.selectedClipId);
+      if (copy) {
+        DAW.ui.renderTracks();
+        DAW.ui.selectClip(copy.id);
+        DAW.audio.reschedule();
+        DAW.history.commit();
+      }
+    } else if (e.code === 'KeyZ' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      if (e.shiftKey) await DAW.history.redo();
+      else await DAW.history.undo();
+    } else if (e.code === 'KeyY' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      await DAW.history.redo();
+    } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+      e.preventDefault();
+      const dir = e.code === 'ArrowRight' ? 1 : -1;
+      const step = DAW.nudgeStep() * (e.shiftKey ? 5 : 1);
+      if (e.altKey && DAW.ui.selectedClipId) {
+        // Alt+矢印: 選択中のクリップをずらす
+        if (DAW.nudgeClip(DAW.ui.selectedClipId, dir * step)) {
+          DAW.ui.renderTracks();
+          DAW.audio.reschedule();
+          DAW.history.commit();
+        }
+      } else {
+        DAW.audio.seek(Math.max(0, DAW.audio.getPos() + dir * step));
+      }
+    } else if ((e.code === 'ArrowUp' || e.code === 'ArrowDown') && e.altKey && DAW.ui.selectedClipId) {
+      // Alt+上下: 選択中のクリップを隣のトラックへ移す
+      e.preventDefault();
+      if (DAW.moveClipToTrack(DAW.ui.selectedClipId, e.code === 'ArrowDown' ? 1 : -1)) {
+        DAW.ui.renderTracks();
+        DAW.audio.reschedule();
+        DAW.history.commit();
       }
     } else if (e.code === 'Home') {
       DAW.audio.seek(0);
+    } else if (e.code === 'Equal' || e.code === 'NumpadAdd') {
+      e.preventDefault();
+      DAW.ui.zoomBy(1.5);
+    } else if (e.code === 'Minus' || e.code === 'NumpadSubtract') {
+      e.preventDefault();
+      DAW.ui.zoomBy(1 / 1.5);
+    } else if (e.code === 'Digit0' || e.code === 'Numpad0') {
+      e.preventDefault();
+      DAW.ui.zoomToFit();
     }
   });
 });
