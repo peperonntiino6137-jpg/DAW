@@ -36,9 +36,10 @@ DAW.objects = {
   },
 
   // ---- 経路（位置オートメーション） ----
-  // obj.path = { enabled, points: [{ t, az, el, dist, ease }] }
+  // obj.path = { enabled, loop, points: [{ t, az, el, dist, ease }] }
   //   t    … プロジェクト絶対時間（秒）。昇順を維持し、同時刻は PATH_MIN_DT を強制する
   //   ease … 「その点から次の点へ向かう」セグメントの緩急
+  //   loop … 最後の点の後、最初の点へ戻って繰り返す（既定 false = 最後の点でホールド）
   PATH_MIN_DT: 0.05,                          // waypoint 同士の最小間隔（秒）
   EASES: ['linear', 'in', 'out', 'inout'],    // 等速 / 加速 / 減速 / S字
 
@@ -83,7 +84,7 @@ DAW.objects = {
       name: name || `オブジェクト ${this.list.length + 1}`,
       color: this.COLORS[this.list.length % this.COLORS.length],
       trackId: trackId || null,
-      path: { enabled: false, points: [] },   // 経路（位置オートメーション）
+      path: { enabled: false, loop: false, points: [] },   // 経路（位置オートメーション）
     }, this.defaults());
     this.list.push(obj);
     return obj;
@@ -129,8 +130,9 @@ DAW.objects = {
   // 手で組んだ古いオブジェクトでも落ちないように、path が無ければここで補う
   ensurePath(obj) {
     if (!obj.path || typeof obj.path !== 'object' || !Array.isArray(obj.path.points)) {
-      obj.path = { enabled: false, points: [] };
+      obj.path = { enabled: false, loop: false, points: [] };
     }
+    if (obj.path.loop == null) obj.path.loop = false;   // loop 導入前のオブジェクト
     return obj.path;
   },
 
@@ -163,13 +165,26 @@ DAW.objects = {
   },
 
   // 経路上の時刻 t（プロジェクト絶対時間）の位置。
-  // 最初の点より前・最後の点より後はホールド（端の位置に留まる）。
+  // 最初の点より前はホールド（最初の点に留まる）。最後の点より後は、
+  //   loop 無効 … 最後の点でホールド（従来どおり）
+  //   loop 有効 … t を経路スパン（最後の点 - 最初の点）で剰余して先頭へ巻き戻す。
+  //               剰余は必ず [0, span) に落とす（負の剰余を出さない）。
+  // 折り返しの瞬間（t = 最後の点 + k*span）は剰余 0 = 最初の点そのもの。空間の繋ぎは
+  // 経路の閉じ方に従う: ジェネレータは終端に始点と同じ「閉じ点」を置くので途切れず、
+  // 手で組んだ開いた経路は端から端へ瞬間移動する（ライブは setTargetAtTime の
+  // 〜20ms グライド、書き出しは折り返し境界のイベントで同じく一瞬で追従する）。
+  // セグメント内の az は常に azLerp の最短弧を通る。
   pathPosAt(obj, t) {
     const pts = obj.path ? obj.path.points : [];
     if (!pts.length) return { az: obj.az, el: obj.el, dist: obj.dist };
     if (t <= pts[0].t) return { az: pts[0].az, el: pts[0].el, dist: pts[0].dist };
     const last = pts[pts.length - 1];
-    if (t >= last.t) return { az: last.az, el: last.el, dist: last.dist };
+    if (t >= last.t) {
+      const span = last.t - pts[0].t;
+      if (!(obj.path.loop && span > 0)) return { az: last.az, el: last.el, dist: last.dist };
+      t = pts[0].t + (((t - pts[0].t) % span) + span) % span;
+      if (t <= pts[0].t) return { az: pts[0].az, el: pts[0].el, dist: pts[0].dist };
+    }
     let i = 0;
     while (i < pts.length - 2 && pts[i + 1].t <= t) i++;
     const a = pts[i];
@@ -269,6 +284,94 @@ DAW.objects = {
     return true;
   },
 
+  // 経路ループの切替（lock の扱いは経路編集と同じ）
+  setPathLoop(id, on) {
+    const obj = this.get(id);
+    if (!this.canEditPosition(obj)) return false;
+    this.ensurePath(obj).loop = !!on;
+    this.changed(obj);
+    return true;
+  },
+
+  // ---- 軌道ジェネレータ ----
+  //
+  // 既存の waypoint 列を「生成して置き換える」だけの機能。出力は普通の経路なので、
+  // 編集・undo・書き出しの焼き込み（bakePath）・保存は既存の仕組みが無改修で効く
+  // （undo は呼び出し側の history.commit 1回で実行前の状態に戻る）。
+  // 点は既定で 1/8 周期ごと + ease 'linear'。円滑さは既存のセグメント補間に任せる。
+  // 終端には始点と同じ「閉じ点」を置くので、loop と組み合わせると途切れず周回する。
+  // 生成した点は loadPath と同じ検証（normalize / clamp / 昇順 / PATH_MIN_DT）を通す。
+  //
+  // kind: 'circle'   一定 el のまま az を一周（dir で回転方向）
+  //       'spiral'   az を回しながら el（と任意で dist）を始点→終点へ漸変
+  //       'eight'    az が中心 ±radius で行き来しつつ el が上下（リサージュ 1:2 の8の字）
+  //       'pingpong' az 中心-radius ←→ 中心+radius の2点間往復（点は折り返しにだけ置く）
+  // opts: t0     開始時刻（秒。既定 0）
+  //       period 1周期の秒数（既定 4）
+  //       beats  1周期の拍数（指定があれば period より優先。拍長は現在の BPM から）
+  //       cycles 周回数（既定 1。1〜32）
+  //       div    1周期あたりの点数（既定 8。4〜96。pingpong は折り返し点のみで div 不使用）
+  //       az/el/dist 中心・基準位置（既定はオブジェクトの現在位置）
+  //       radius 振幅（度。既定 45、1〜90。eight / pingpong で使用）
+  //       el1    spiral の終点 el（既定 60）
+  //       dist1  spiral の終点 dist（省略時は dist 一定）
+  //       dir    回転方向（1=左回り / -1=右回り。既定 1。circle / spiral で使用）
+  generatePath(id, kind, opts) {
+    const obj = this.get(id);
+    if (!this.canEditPosition(obj)) return null;
+    const q = opts || {};
+    const num = (v, d) => (isFinite(+v) ? +v : d);
+    const t0 = Math.max(0, num(q.t0, 0));
+    const cycles = Math.max(1, Math.min(32, Math.round(num(q.cycles, 1))));
+    const div = Math.max(4, Math.min(96, Math.round(num(q.div, 8))));
+    // 周期。拍指定があれば優先。div 個の点が PATH_MIN_DT を割らない長さは確保する
+    let period = num(q.beats, 0) > 0
+      ? num(q.beats, 0) * (DAW.beatDuration ? DAW.beatDuration() : 0.5)
+      : num(q.period, 4);
+    period = Math.max(div * this.PATH_MIN_DT, period);
+    const az0 = num(q.az, obj.az);
+    const el0 = num(q.el, obj.el);
+    const dist0 = this.clamp('dist', num(q.dist, obj.dist));
+    // 振幅は 90° まで（pingpong の2点が 180° を超えて離れると azLerp の最短弧が裏へ回るため）
+    const radius = Math.max(1, Math.min(90, num(q.radius, 45)));
+    const dir = num(q.dir, 1) < 0 ? -1 : 1;
+    const pts = [];
+    const push = (t, az, el, dist) => pts.push({ t, az, el, dist, ease: 'linear' });
+    if (kind === 'pingpong') {
+      // 直線往復に中間点は要らない（補間が直線なので）。折り返しにだけ点を置く
+      for (let k = 0; k < cycles; k++) {
+        push(t0 + k * period, az0 - radius, el0, dist0);
+        push(t0 + (k + 0.5) * period, az0 + radius, el0, dist0);
+      }
+      push(t0 + cycles * period, az0 - radius, el0, dist0);   // 閉じ点
+    } else if (kind === 'circle' || kind === 'spiral' || kind === 'eight') {
+      const el1 = kind === 'spiral' ? num(q.el1, 60) : el0;
+      const d1 = kind === 'spiral' && q.dist1 != null ? this.clamp('dist', num(q.dist1, dist0)) : dist0;
+      const N = cycles * div;
+      for (let k = 0; k <= N; k++) {
+        const w = k / div;    // 通し周回数（circle/spiral の回転量）
+        const v = k / N;      // 全体の進行 0〜1（spiral の漸変）
+        const u = (k % div) / div;   // 周回内の位相（eight。k=N は u=0 = 閉じ点）
+        if (kind === 'eight') {
+          push(t0 + w * period,
+               az0 + radius * Math.sin(2 * Math.PI * u),
+               el0 + (radius / 2) * Math.sin(4 * Math.PI * u), dist0);
+        } else {
+          push(t0 + w * period, az0 + dir * 360 * w,
+               el0 + (el1 - el0) * v, dist0 + (d1 - dist0) * v);
+        }
+      }
+    } else {
+      return null;   // 未知の形状
+    }
+    // 検証は読み込みと同じ経路（normalize / clamp / 昇順 / PATH_MIN_DT）を通す。
+    // enabled / loop は触らない（有効化やループはそれぞれの API の担当）。
+    const path = this.ensurePath(obj);
+    path.points = this.loadPath({ points: pts }).points;
+    this.changed(obj);
+    return path.points;
+  },
+
   // az/el/dist/width/gainDb などの数値パラメータをまとめて更新する。
   // 位置系は lock='pos' でも拒否される。
   set(id, key, value) {
@@ -343,12 +446,13 @@ DAW.objects = {
       gainDb: o.gainDb, revSend: o.revSend, mute: !!o.mute, solo: !!o.solo, lock: o.lock,
       path: {
         enabled: !!(o.path && o.path.enabled),
+        loop: !!(o.path && o.path.loop),
         points: (o.path ? o.path.points : []).map(p => ({ t: p.t, az: p.az, el: p.el, dist: p.dist, ease: p.ease })),
       },
     }));
   },
 
-  // 経路の読み込み。欠落は { enabled:false, points:[] }、不正な ease は 'linear'、
+  // 経路の読み込み。欠落は { enabled:false, loop:false, points:[] }、不正な ease は 'linear'、
   // t は昇順に並べ直し、同時刻（PATH_MIN_DT 未満）は後の点を押し出して間隔を守る。
   loadPath(src) {
     const p = src && typeof src === 'object' ? src : {};
@@ -368,7 +472,7 @@ DAW.objects = {
     for (let i = 1; i < pts.length; i++) {
       if (pts[i].t < pts[i - 1].t + this.PATH_MIN_DT) pts[i].t = pts[i - 1].t + this.PATH_MIN_DT;
     }
-    return { enabled: !!p.enabled, points: pts };
+    return { enabled: !!p.enabled, loop: !!p.loop, points: pts };
   },
 
   // 読み込み。旧プロジェクト（objects を持たない）は空配列で開く。

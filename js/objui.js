@@ -113,6 +113,7 @@ DAW.objui = {
       sphere: $('obj-sphere'),
       pathEnable: $('obj-path-enable'),
       pathEditBtn: $('obj-path-edit'),
+      pathGenBtn: $('obj-path-gen'),
       stripScroll: $('obj-strip-scroll'),
       strips: $('obj-strips'),
       master: $('obj-master'),
@@ -143,6 +144,8 @@ DAW.objui = {
     // 経路（位置オートメーション）のトグルと編集モード
     if (this.els.pathEnable) this.els.pathEnable.addEventListener('click', () => this.togglePathEnabled());
     if (this.els.pathEditBtn) this.els.pathEditBtn.addEventListener('click', () => this.togglePathEdit());
+    // 軌道ジェネレータ（形状メニュー → パラメータ枠 → 生成）
+    if (this.els.pathGenBtn) this.els.pathGenBtn.addEventListener('click', () => this.openGenMenu());
 
     // トップビューのドラッグ。move/up は window で受ける（canvas の外へ出ても追従させる）
     this.els.top.addEventListener('pointerdown', e => this.onTopDown(e));
@@ -563,8 +566,132 @@ DAW.objui = {
     e.pathEnable.classList.toggle('on', on);
     e.pathEditBtn.disabled = !obj;
     e.pathEditBtn.classList.toggle('on', this.pathEdit);
+    if (e.pathGenBtn) {
+      e.pathGenBtn.disabled = !obj;
+      if (!obj) this.closeGenBox();   // 選択が消えたらパラメータ枠も片付ける
+    }
     // undo などで waypoint が減って番号が範囲外になったら選択を外す
     if (this.pathSel != null && (!obj || !obj.path || this.pathSel >= obj.path.points.length)) this.pathSel = null;
+  },
+
+  // ---- 軌道ジェネレータ（生成は DAW.objects.generatePath。ここはメニューと小さな入力枠だけ）----
+
+  GEN_KINDS: [
+    { kind: 'circle', label: '円（az を一周）', extra: '仰角°' },
+    { kind: 'spiral', label: 'スパイラル（回りながら仰角を漸変）', extra: '終点仰角°' },
+    { kind: 'eight', label: '8の字（az↔el のリサージュ）', extra: '振幅°' },
+    { kind: 'pingpong', label: '往復（2点間）', extra: '振幅°' },
+  ],
+
+  // 「生成」ボタン → 形状4種 + ループ切替のメニュー（既存の ui.showMenu を流用）
+  openGenMenu() {
+    const obj = DAW.objects.selected();
+    if (!obj || !DAW.ui || !DAW.ui.showMenu) return;
+    const r = this.els.pathGenBtn.getBoundingClientRect();
+    const loopOn = !!(obj.path && obj.path.loop);
+    const items = this.GEN_KINDS.map(g => ({ label: g.label, run: () => this.openGenBox(g.kind) }));
+    items.push({ label: `ループ再生: ${loopOn ? 'ON → OFF にする' : 'OFF → ON にする'}`,
+                 run: () => this.togglePathLoop() });
+    DAW.ui.showMenu(r.left, r.bottom + 2, items);
+    if (DAW.ui.setHint) DAW.ui.setHint('軌道ジェネレータ: 形状を選ぶと既存の経路を置き換えます（undo 1回で戻せます）。ループは最後の点から最初の点へ繰り返します');
+  },
+
+  // 経路ループの切替（メニューから）。モデルの検証（lock）は setPathLoop が担う
+  togglePathLoop() {
+    const obj = DAW.objects.selected();
+    if (!obj) return false;
+    if (!DAW.objects.setPathLoop(obj.id, !(obj.path && obj.path.loop))) {
+      if (DAW.ui.setHint) DAW.ui.setHint('固定中のオブジェクトはループを変更できません');
+      this.render();
+      return false;
+    }
+    if (DAW.ui.setHint) DAW.ui.setHint(`経路ループ: ${obj.path.loop ? 'ON（最後の点の後、最初の点へ戻って繰り返す）' : 'OFF（最後の点でホールド）'}`);
+    this.render();
+    DAW.history.commit();
+    return true;
+  },
+
+  // 形状ごとの小さなパラメータ枠（周期 / 回数 / 形状固有の角度 + 生成ボタン）。
+  // 常設 UI にはせず、メニュー直下に使い捨ての枠を出す（過剰な UI を作らない）
+  openGenBox(kind) {
+    this.closeGenBox();
+    const def = this.GEN_KINDS.find(g => g.kind === kind);
+    const obj = DAW.objects.selected();
+    if (!def || !obj) return;
+    const box = document.createElement('div');
+    box.id = 'obj-gen-box';
+    const title = document.createElement('div');
+    title.className = 'ogb-title';
+    title.textContent = def.label;
+    box.appendChild(title);
+    const mkNum = (label, value, min, max, step) => {
+      const lab = document.createElement('label');
+      const sp = document.createElement('span');
+      sp.textContent = label;
+      const inp = document.createElement('input');
+      inp.type = 'number';
+      inp.value = value;
+      inp.min = min;
+      inp.max = max;
+      inp.step = step;
+      lab.append(sp, inp);
+      box.appendChild(lab);
+      return inp;
+    };
+    // 形状固有の3つ目: circle=その仰角 / spiral=終点仰角 / eight・pingpong=振幅
+    const extraDef = kind === 'circle' ? Math.round(obj.el) : kind === 'spiral' ? 60 : 45;
+    const inPeriod = mkNum('周期 s', 4, 0.5, 60, 0.5);
+    const inCycles = mkNum('回数', 1, 1, 32, 1);
+    const inExtra = mkNum(def.extra, extraDef, -90, 90, 5);
+    const apply = document.createElement('button');
+    apply.className = 'ogb-apply';
+    apply.textContent = '生成';
+    apply.addEventListener('click', () => this.applyGenerate(kind, +inPeriod.value, +inCycles.value, +inExtra.value));
+    const close = document.createElement('button');
+    close.className = 'ogb-close';
+    close.textContent = '✕';
+    close.title = '閉じる';
+    close.addEventListener('click', () => this.closeGenBox());
+    box.append(apply, close);
+    document.body.appendChild(box);
+    // 「生成」ボタンの直下に置き、右端では内側へ補正する（ctx-menu と同じ流儀）
+    const r = this.els.pathGenBtn.getBoundingClientRect();
+    const br = box.getBoundingClientRect();
+    box.style.left = Math.max(4, Math.min(r.left, window.innerWidth - br.width - 4)) + 'px';
+    box.style.top = (r.bottom + 2) + 'px';
+    if (DAW.ui.setHint) DAW.ui.setHint(`${def.label}: 開始は再生ヘッド位置、点は 1/8 周期ごと。生成は既存の経路を置き換えます`);
+  },
+
+  closeGenBox() {
+    const box = document.getElementById('obj-gen-box');
+    if (box) box.remove();
+  },
+
+  // 生成の実行。生成 + 経路の有効化をまとめて undo 1回ぶんの操作にする
+  applyGenerate(kind, period, cycles, extra) {
+    const obj = DAW.objects.selected();
+    if (!obj) return false;
+    const opts = {
+      t0: DAW.audio.displayPos ? DAW.audio.displayPos() : 0,   // 開始時刻 = 再生ヘッド位置
+      period, cycles,
+    };
+    if (kind === 'circle') opts.el = extra;
+    else if (kind === 'spiral') opts.el1 = extra;
+    else opts.radius = Math.abs(extra);
+    const pts = DAW.objects.generatePath(obj.id, kind, opts);
+    if (!pts) {
+      if (DAW.ui.setHint) DAW.ui.setHint('固定中のオブジェクトは経路を生成できません');
+      this.closeGenBox();
+      this.render();
+      return false;
+    }
+    DAW.objects.setPathEnabled(obj.id, true);   // 生成できた = lock 'none' なので必ず成功する
+    this.closeGenBox();
+    this.render();
+    DAW.history.commit();
+    const label = (this.GEN_KINDS.find(g => g.kind === kind) || { label: kind }).label;
+    if (DAW.ui.setHint) DAW.ui.setHint(`${label} を生成しました（${pts.length} 点。undo 1回で元に戻せます）`);
+    return true;
   },
 
   // 経路編集の操作が生きているか（編集トグル ON かつ選択オブジェクトの経路が有効）
@@ -2135,9 +2262,9 @@ DAW.objui = {
       mix(o.width * 100); mix(o.gainDb * 100);
       mix(o.revSend * 1000);   // Rev センド。混ぜ忘れると undo 後にノブが追従しない
       mix((o.mute ? 1 : 0) | (o.solo ? 2 : 0) | (o.lock === 'pos' ? 4 : o.lock === 'all' ? 8 : 0));
-      // 経路（有効フラグ + 各点の t/az/el/dist/ease）。混ぜ忘れると undo 後にビューが追従しない
-      const path = o.path || { enabled: false, points: [] };
-      mix(path.enabled ? 1 : 0);
+      // 経路（有効/ループフラグ + 各点の t/az/el/dist/ease）。混ぜ忘れると undo 後にビューが追従しない
+      const path = o.path || { enabled: false, loop: false, points: [] };
+      mix((path.enabled ? 1 : 0) | (path.loop ? 2 : 0));
       mix(path.points.length);
       for (const p of path.points) {
         mix(p.t * 1000); mix(p.az * 1000); mix(p.el * 1000); mix(p.dist * 10000);

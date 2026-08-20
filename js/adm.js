@@ -90,7 +90,7 @@ DAW.adm = {
       const dur = until - from;
       return [{ rtime: 0, duration: dur, az: obj.az, el: obj.el, dist: obj.dist }];
     }
-    const times = DAW.objaudio.bakeTimes(path.points, from, until);
+    const times = DAW.objaudio.bakeTimes(path.points, from, until, path.loop);   // loop は周回ぶん展開される
     const blocks = [];
     for (let i = 0; i + 1 < times.length; i++) {
       const pos = DAW.objects.pathPosAt(obj, i === 0 ? times[0] : times[i + 1]);
