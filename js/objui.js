@@ -136,6 +136,11 @@ DAW.objui = {
     this.els.stripScroll.addEventListener('scroll', () => this.renderStrips());
     window.addEventListener('resize', () => this.render());
 
+    // syncStrip はフォーカス中の欄を書き換えない（入力の邪魔をしない）ので、
+    // フォーカスしたまま undo されると表示だけ古い値で残り、署名は更新済みのため
+    // rAF 同期も二度と拾わない。フォーカスが外れた時に一度描き直して取り返す。
+    this.els.stripScroll.addEventListener('focusout', () => this.render());
+
     this.render();
     requestAnimationFrame(t => this.tick(t));
   },
@@ -158,12 +163,22 @@ DAW.objui = {
 
   render() {
     if (!this._inited) return;
-    this.updateCount();
-    this.drawTop();
-    this.drawSphere();
-    this.renderStrips();
-    this.renderRenderer();
-    this._sig = this.stateSig();
+    // フォーカス中のストリップを renderStrips が外すと focusout が同期発火し、
+    // そのハンドラ（下の focusout → render）が再入して DOM 操作が衝突する。
+    // 再入時は何もしない（外側の render がこの後どうせ全体を流し込む）。
+    if (this._rendering) return;
+    this._rendering = true;
+    try {
+      this.updateCount();
+      this.drawTop();
+      this.drawSphere();
+      this.renderStrips();
+      this.renderRenderer();
+      this.syncTrackBadges();
+      this._sig = this.stateSig();
+    } finally {
+      this._rendering = false;
+    }
   },
 
   updateCount() {
@@ -174,7 +189,7 @@ DAW.objui = {
 
   addObject() {
     // 音源トラックは「まだオブジェクトに割り当てていない先頭のトラック」を仮に結ぶ。
-    // 割り当ての編集UIは後日（今は位置を作れることが目的）。
+    // 後からストリップのトラックセレクタ（os-track）で付け替えられる。
     const used = new Set(DAW.objects.list.map(o => o.trackId));
     const free = DAW.project.tracks.find(t => !used.has(t.id));
     const obj = DAW.objects.create(null, free ? free.id : null);
@@ -189,6 +204,19 @@ DAW.objui = {
     const obj = DAW.objects.selected();
     if (!obj) return false;
     DAW.objects.remove(obj.id);
+    this.render();
+    DAW.history.commit();
+    return true;
+  },
+
+  // セレクタからのトラック割り当て変更。奪い取り等の不変条件は DAW.objects.assignTrack が守る。
+  // どのトラックがオブジェクト行きかは trackDest() が**ノード生成時**に決めるので、
+  // 変わったらグラフを組み直す（width の点音源⇔2ソース切り替えと同じ扱い）。
+  // undo はセレクト系の既存パターンどおり change で1回だけ commit する。
+  setTrack(id, trackId) {
+    if (!DAW.objects.assignTrack(id, trackId)) { this.render(); return false; }
+    DAW.audio.resetNodes();
+    DAW.audio.reschedule();   // 再生中ならその位置から組み直す（停止中は何もしない）
     this.render();
     DAW.history.commit();
     return true;
@@ -811,6 +839,14 @@ DAW.objui = {
     name.addEventListener('change', () => { this.render(); DAW.history.commit(); });
     head.append(dot, name);
 
+    // 音源トラックのセレクタ。選択肢は「(未割り当て)」+ 全トラック。
+    // options はトラック構成が変わったときだけ syncStrip が作り直す（_sig で判定）。
+    const track = document.createElement('select');
+    track.className = 'os-track';
+    track.title = '音源トラック（他のオブジェクトが使用中のトラックを選ぶと、そちらは未割り当てに戻る）';
+    track.addEventListener('pointerdown', e => e.stopPropagation());
+    track.addEventListener('change', () => this.setTrack(id, track.value || null));
+
     // Az / El / Width の数値ボックス（双方向バインド）
     const nums = document.createElement('div');
     nums.className = 'os-nums';
@@ -878,11 +914,11 @@ DAW.objui = {
     });
     ms.append(mute, solo);
 
-    el.append(head, nums, lock, peak, fader, gain, ms);
+    el.append(head, track, nums, lock, peak, fader, gain, ms);
     // 子要素の参照を控えておく（syncStrip はドラッグ中に毎フレーム走るので、
     // そのたびに querySelector を10回叩かない。js/ui.js の el._clip と同じ発想）。
     el._r = {
-      dot, name, lock, peak, fader, gain, mute, solo,
+      dot, name, track, lock, peak, fader, gain, mute, solo,
       az: nums.querySelector('.os-in-az'),
       el: nums.querySelector('.os-in-el'),
       width: nums.querySelector('.os-in-width'),
@@ -941,6 +977,32 @@ DAW.objui = {
     if (r.name !== act) r.name.value = obj.name;
     r.name.disabled = obj.lock === 'all';
 
+    // トラックセレクタ。options はトラック構成（追加/削除/改名/並び替え）が変わったときだけ
+    // 作り直す。ストリップは仮想化でスクロールのたびに DOM ごと作り直されるので、
+    // 「作った時点の選択肢を持ち続ける」実装にはできない（ここで毎回 state から流し込む）。
+    const tsig = this.tracksSig();
+    if (r.track._sig !== tsig) {
+      r.track._sig = tsig;
+      r.track.textContent = '';
+      const ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = '(未割り当て)';
+      r.track.appendChild(ph);
+      for (const t of DAW.project.tracks) {
+        const opt = document.createElement('option');
+        opt.value = t.id;
+        opt.textContent = t.name;
+        r.track.appendChild(opt);
+      }
+    }
+    if (r.track !== act) {
+      // 参照先のトラックが消えていたら表示は「(未割り当て)」に落とす（state は書き換えない。
+      // rAF から勝手に state を触ると履歴の署名とずれる。削除時の解除は DAW.removeTrack の担当）。
+      const has = obj.trackId && DAW.project.tracks.some(t => t.id === obj.trackId);
+      r.track.value = has ? obj.trackId : '';
+      r.track.classList.toggle('none', !has);
+    }
+
     const movable = DAW.objects.canEditPosition(obj);   // 'pos' / 'all' は位置を編集させない
     for (const key of ['az', 'el', 'width']) {
       const inp = r[key];
@@ -968,6 +1030,46 @@ DAW.objui = {
     el._r.peak.className = 'os-peak ' + this.peakClass(p);
   },
 
+  // トラック構成の署名。セレクタの options を作り直すべきか（syncStrip）の判定に使う。
+  tracksSig() {
+    let s = '';
+    for (const t of DAW.project.tracks) s += t.id + '\u0000' + t.name + '\u0001';
+    return s;
+  },
+
+  // ---- タイムライン側トラックヘッダのバッジ ----
+  //
+  // 「このトラックはオブジェクトに割り当て済み」をトラック側からも見えるようにする。
+  // js/ui.js はフックしない: renderTracks() は DOM を丸ごと作り直すので、フックしても
+  // バッジはすぐ消える。代わりにこちら側から render() と 30fps のメーター更新のたびに
+  // 貼り直す（既存の stateSig() 同期と同じ「rAF で追従する」方式）。
+  // トラックヘッダ自体は id を持たないので、隣の .lane[data-track-id] から辿る。
+  syncTrackBadges() {
+    const lanes = document.querySelectorAll('.lane[data-track-id]');
+    for (const lane of lanes) {
+      const head = lane.previousElementSibling;   // buildTrackRow は head → lane の順で並べる
+      if (!head || !head.classList.contains('track-head')) continue;
+      const obj = DAW.objects.list.find(o => o.trackId === lane.dataset.trackId) || null;
+      let badge = head.querySelector('.th-obj');
+      if (!obj) {
+        if (badge) badge.remove();
+        continue;
+      }
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'th-obj';
+        badge.title = 'オブジェクトベース音響へ出力中（PANNER のストリップで割り当てを変更）';
+        // M/S ボタンの行の右端に置く（無ければヘッダ末尾）
+        const row = head.querySelector('.th-btns');
+        (row || head).appendChild(badge);
+      }
+      const text = '◆ ' + obj.name;
+      if (badge.textContent !== text) badge.textContent = text;
+      // style.color は正規化された rgb() が返るので、比較用に元の色を dataset に控える
+      if (badge.dataset.c !== obj.color) { badge.dataset.c = obj.color; badge.style.color = obj.color; }
+    }
+  },
+
   // ---- メータリング ----
   //
   // ピークは「線形」で持つ（0 = 無音 = -∞ 表示）。DAW.objaudio.peakDb() は
@@ -990,6 +1092,9 @@ DAW.objui = {
       this.syncPeak(el, id);
     }
     this.updateMasterMeter();
+    // トラックヘッダのバッジもここで貼り直す。renderTracks() は state を変えずに
+    // DOM を作り直すことがある（リサイズ・ズーム等）ので、署名同期だけでは拾えない。
+    this.syncTrackBadges();
     return true;
   },
 
@@ -1243,9 +1348,15 @@ DAW.objui = {
       mixStr(o.id);
       mixStr(o.name);
       mixStr(o.color);
+      mixStr(String(o.trackId));   // 割り当ての undo / 奪い取りの巻き添えにセレクタが追従する
       mix(o.az * 1000); mix(o.el * 1000); mix(o.dist * 10000);
       mix(o.width * 100); mix(o.gainDb * 100);
       mix((o.mute ? 1 : 0) | (o.solo ? 2 : 0) | (o.lock === 'pos' ? 4 : o.lock === 'all' ? 8 : 0));
+    }
+    // トラックの追加/削除/改名/並び替えにも追従する（セレクタの options とバッジの表示が変わる）
+    for (const t of DAW.project.tracks) {
+      mixStr(t.id);
+      mixStr(String(t.name));
     }
     // このUIを経由しないリミッター/配置の変更にも追従させる
     mixStr(this.view);

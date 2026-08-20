@@ -202,6 +202,16 @@ input[type="range"] { accent-color: var(--accent); }
 .th-slider { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
 .th-slider input { flex: 1; min-width: 0; }
 .th-btns { display: flex; gap: 4px; align-items: center; }
+/* オブジェクト割り当てバッジ（js/objui.js の syncTrackBadges が M/S の行へ差し込む）。
+   色はオブジェクトの識別色を style.color で流し込む */
+.th-obj {
+  margin-left: auto;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+}
 .t-mute, .t-solo { padding: 1px 8px; font-size: 11px; }
 .t-mute.on { background: #b3452e; border-color: #b3452e; color: #fff; }
 .t-solo.on { background: #b3922e; border-color: #b3922e; color: #fff; }
@@ -474,6 +484,18 @@ input[type="range"] { accent-color: var(--accent); }
 }
 .os-name:hover, .os-name:focus { border-color: var(--border); background: #101014; outline: none; }
 .os-title { font-size: 11px; color: var(--dim); letter-spacing: 1px; }
+
+/* 音源トラックのセレクタ。未割り当て（value=""）のときは薄くする */
+.os-track {
+  width: 100%;
+  background: #101014;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 10px;
+  padding: 1px 2px;
+}
+.os-track.none { color: var(--dim); }
 
 .os-nums { display: flex; flex-direction: column; gap: 2px; }
 .os-num { display: flex; align-items: center; gap: 3px; font-size: 10px; color: var(--dim); }

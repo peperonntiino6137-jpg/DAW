@@ -151,6 +151,28 @@ DAW.objects = {
     return false;
   },
 
+  // トラックの割り当てを付け替える（trackId は null で未割り当て）。
+  // 不変条件「1トラック = 最大1オブジェクト」をここで守る: 既に他のオブジェクトが
+  // 使っているトラックを選んだら、そちらを未割り当てへ外す（奪い取り）。
+  // レンダラー（audio.trackDest → objaudio.forTrack）は find で最初の1個しか見ないため、
+  // 重複を許すと2個目以降が「割り当て済みに見えるのに鳴らない」死にオブジェクトになる。
+  // lock は見ない（割り当てはルーティングであって位置/パラメータの編集ではない。
+  // lock='all' から奪えないと、付け替えが永久にできなくなる）。
+  assignTrack(id, trackId) {
+    const obj = this.get(id);
+    if (!obj) return false;
+    const tid = trackId || null;
+    if (obj.trackId === tid) return false;   // 変化なし
+    if (tid) {
+      for (const o of this.list) {
+        if (o !== obj && o.trackId === tid) { o.trackId = null; this.changed(o); }
+      }
+    }
+    obj.trackId = tid;
+    this.changed(obj);
+    return true;
+  },
+
   anySolo() { return this.list.some(o => o.solo); },
 
   // ミュート/ソロを織り込んだ実効ゲイン（線形）
@@ -190,6 +212,15 @@ DAW.objects = {
         lock: ['none', 'pos', 'all'].includes(src.lock) ? src.lock : 'none',
       };
     });
+    // 同じトラックを指す重複割り当ては先勝ちで解消する（手で編集されたファイル対策）。
+    // レンダラーは「1トラック = 最大1オブジェクト」前提で最初の1個しか見ないので、
+    // 残しても2個目以降は鳴らない。読み込み時点で不変条件へ揃えておく。
+    const usedTracks = new Set();
+    for (const o of this.list) {
+      if (!o.trackId) continue;
+      if (usedTracks.has(o.trackId)) o.trackId = null;
+      else usedTracks.add(o.trackId);
+    }
     if (!this.get(this.selectedId)) this.selectedId = this.list.length ? this.list[0].id : null;
     return this.list;
   },

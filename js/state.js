@@ -110,6 +110,13 @@ const DAW = {
     if (i < 0) return;
     DAW.audio.removeTrackNodes(trackId);
     this.project.tracks.splice(i, 1);
+    // このトラックに割り当てられたオブジェクトは未割り当てへ戻す。残すと
+    // 「割り当て済みに見えるのに鳴らない」死に参照が保存ファイルにまで残る。
+    // 呼び出し側（ui.js の削除ハンドラ）が直後に commit するので、削除と解除は
+    // undo 1エントリになり、undo すれば割り当てごと復元される。
+    if (this.objects) {
+      for (const o of this.objects.list) if (o.trackId === trackId) o.trackId = null;
+    }
     this.collectBuffers();
   },
 

@@ -57,6 +57,23 @@ console.error = function (...args) {
   _consoleError(...args);
 };
 
+// ライブ用 AudioContext は物理デバイスへ出さない（sinkId: 'none'）。
+// この環境（Chrome 151 headless=new / Windows）では実デバイス出力が不安定で、
+//   - --mute-audio を付けると currentTime が 0 のまま進まず [10] の再生位置系が落ちる
+//   - 実デバイスへ出すとデバイス確保でハングして 90 秒ウォッチドッグに達することがある
+// sinkId 'none' は「デバイスを開かずにレンダリングだけ続ける」仕様どおりのモードで、
+// クロックが進み・無音で・デバイスにも触らない。テストの決定性のためここで固定する。
+// OfflineAudioContext（書き出し検証）はデバイス無関係なので触らない。
+(function () {
+  const OrigAC = window.AudioContext;
+  if (!OrigAC) return;
+  const Patched = function AudioContext(opts) {
+    return new OrigAC(Object.assign({}, opts, { sinkId: 'none' }));
+  };
+  Patched.prototype = OrigAC.prototype;
+  window.AudioContext = Patched;
+})();
+
 // モーダル系は必ずスタブ（実行が止まるのを防ぐ）
 window.alert = function (msg) { window.HARNESS.alerts.push(String(msg)); };
 window.confirm = function (msg) {

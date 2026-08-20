@@ -156,6 +156,11 @@ PROFILE_NATIVE="$(native_path "$PROFILE")"
 URL="file:///${PAGE_NATIVE#/}?port=$PORT"
 START="$(date +%s.%N)"
 
+# 消音は --mute-audio ではなく harness.js の sinkId:'none'（デバイスレス出力）で行う。
+# Chrome 151 の headless=new では --mute-audio だとリアルタイム AudioContext の
+# currentTime が進まず再生位置系のテストが落ち、逆に実デバイスへ出すと
+# デバイス確保でハングすることがある。--mute-audio は保険として残す
+# （sinkId:'none' が効いていればどのみち音は出ない）。
 "$CHROME" \
   --headless=new \
   --disable-gpu \
