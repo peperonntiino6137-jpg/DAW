@@ -110,6 +110,11 @@
         <div class="obj-view-label">TOP VIEW</div>
         <canvas id="obj-top" title="クリック・ドラッグで選択中のオブジェクトを動かす"></canvas>
       </div>
+      <!-- 正面ビュー。リスナーを背後から見る（3D球ビューと同じ向き）。横=左右、縦=高さ。 -->
+      <div id="obj-frontview">
+        <div class="obj-view-label">FRONT VIEW</div>
+        <canvas id="obj-front" title="ドラッグで選択中のオブジェクトの左右・高さを動かす（距離はトップビュー）"></canvas>
+      </div>
       <div id="obj-strip-area">
         <!-- 可視ぶんのストリップだけを絶対配置で置く。幅は DAW.objui が設定する -->
         <div id="obj-strip-scroll"><div id="obj-strips"></div></div>

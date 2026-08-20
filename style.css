@@ -436,8 +436,9 @@ input[type="range"] { accent-color: var(--accent); }
 #obj-sphere:active { cursor: grabbing; }
 
 /* トップビュー（真上から見た図）。同心円=距離、放射線=方位 */
-/* 幅は「左 +90°」ラベルが円に重ならない程度に取る */
-#obj-topview { position: relative; flex: none; width: 340px; border-right: 1px solid var(--border); }
+/* 基本は「左 +90°」ラベルが円に重ならない 340px。狭い画面では正面ビューを足したぶん
+   ストリップ帯（#obj-strip-area の min-width）を守るために縮む */
+#obj-topview { position: relative; flex: 0 1 340px; min-width: 190px; border-right: 1px solid var(--border); }
 .obj-view-label {
   position: absolute;
   top: 4px;
@@ -449,8 +450,20 @@ input[type="range"] { accent-color: var(--accent); }
 }
 #obj-top { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
 
+/* 正面ビュー（リスナーを背後から見た図）。横=左右、縦=高さ。距離はトップビューの担当。
+   狭い画面では球ビューと同じくストリップ側を優先して縮む（min-width まで）。 */
+#obj-frontview {
+  position: relative;
+  flex: 0 1 260px;
+  min-width: 150px;
+  border-right: 1px solid var(--border);
+}
+#obj-front { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+
 /* ストリップ帯（可視ぶんだけ DOM がある）とマスターストリップ */
-#obj-strip-area { flex: 1; min-width: 0; display: flex; }
+/* min-width はストリップ1本(92px)+マスター(92px)+境界ぶん。ビューを3枚並べても
+   ストリップ帯が幅0に潰れない（潰れると仮想化が1本も DOM を作らない） */
+#obj-strip-area { flex: 1; min-width: 190px; display: flex; }
 #obj-strip-scroll { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; position: relative; }
 #obj-strips { position: relative; height: 100%; min-width: 100%; }
 

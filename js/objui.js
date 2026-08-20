@@ -1,7 +1,7 @@
 'use strict';
 
 // オブジェクトベース音響の操作UI。
-// PANNER（3D球ビュー / トップビュー / オブジェクトストリップ）と
+// PANNER（3D球ビュー / トップビュー / 正面ビュー / オブジェクトストリップ）と
 // RENDERER（スピーカー配置の選択 / マスターリミッターのノブ）、そしてメータリング。
 //
 // 方針:
@@ -21,6 +21,8 @@ DAW.objui = {
   OVERSCAN: 1,        // 可視範囲の左右に余分に作る本数（スクロール時のちらつき防止）
   TOP_PAD: 20,        // トップビューの外周余白(px)。方位ラベルを置く場所
   HIT_PX: 14,         // トップビューのヒット判定半径(px)
+  FRONT_PAD: 20,      // 正面ビューの外周余白(px)。上下左右のラベルを置く場所
+  FRONT_HIT_PX: 14,   // 正面ビューのヒット判定半径(px)
   METER_FPS: 30,      // ピーク表示の更新レート
 
   // ---- 3D球ビュー ----
@@ -64,6 +66,7 @@ DAW.objui = {
   view: 'panner',     // 'panner' | 'renderer'
   layoutName: '5.1',  // RENDERER で選択中のスピーカー配置
   drag: null,         // トップビューのドラッグ中の状態 { id, moved }
+  fdrag: null,        // 正面ビューのドラッグ中の状態 { id, back, moved }
   sdrag: null,        // 3D球ビューのドラッグ中の状態 { id, near, moved }
   kdrag: null,        // ノブのドラッグ中の状態 { key, y0, v0 }
   strips: new Map(),  // id -> ストリップDOM（可視ぶんだけ）
@@ -87,6 +90,8 @@ DAW.objui = {
       del: $('obj-del'),
       topWrap: $('obj-topview'),
       top: $('obj-top'),
+      frontWrap: $('obj-frontview'),
+      front: $('obj-front'),
       sphereWrap: $('obj-sphereview'),
       sphere: $('obj-sphere'),
       stripScroll: $('obj-strip-scroll'),
@@ -116,6 +121,14 @@ DAW.objui = {
     window.addEventListener('pointermove', e => this.onTopMove(e));
     window.addEventListener('pointerup', e => this.onTopUp(e));
     window.addEventListener('pointercancel', e => this.onTopUp(e));
+
+    // 正面ビューのドラッグ（az/el のみ。距離はトップビュー側で操作する）
+    if (this.els.front) {
+      this.els.front.addEventListener('pointerdown', e => this.onFrontDown(e));
+      window.addEventListener('pointermove', e => this.onFrontMove(e));
+      window.addEventListener('pointerup', e => this.onFrontUp(e));
+      window.addEventListener('pointercancel', e => this.onFrontUp(e));
+    }
 
     // 3D球ビューのドラッグ（az/el のみ。距離はトップビュー側で操作する）
     if (this.els.sphere) {
@@ -171,6 +184,7 @@ DAW.objui = {
     try {
       this.updateCount();
       this.drawTop();
+      this.drawFront();
       this.drawSphere();
       this.renderStrips();
       this.renderRenderer();
@@ -417,6 +431,206 @@ DAW.objui = {
   moveTo(id, clientX, clientY, g) {
     const p = this.xyToPos(clientX, clientY, g);
     return DAW.objects.setPosition(id, p.az, null, p.dist);
+  },
+
+  // ---- 正面ビュー（FRONT VIEW）----
+  //
+  // リスナーを背後から見る（3D球ビューと同じ向き。+az＝左が画面の左に出る）。
+  // 横軸=左右（直交座標の x）、縦軸=高さ（y）。前後（z）は画面に出ない正射影で、
+  // トップビューが点の大きさでしか示せない「高さ」をまっすぐ縦軸で編集する。
+  // 距離はトップビューの担当なのでここでは変えない（3D球ビューと同じ分担）。
+
+  // 極座標 → 画面。変換は DAW.objaudio.toCartesian に一本化する（式をここに複製すると
+  // 片方だけ直したときに鏡像になる。トップビュー・3D球ビューで踏んだ轍）。
+  // back は「リスナーの後方（z>0）か」。正射影では前後が画面に出ないので描き分けに使う。
+  frontXY(az, el, dist, g) {
+    const c = DAW.objaudio.toCartesian(az, el, dist);
+    return { x: g.cx + g.R * c.x, y: g.cy - g.R * c.y, back: c.z > 0 };   // 画面 y は下向きなので反転
+  },
+
+  // 画面 → az/el（frontXY の逆）。dist は変えないので、その dist の円上へ戻す。
+  // 前後（z の符号）は画面から決められないため、掴んだ時点の半球（back）を呼び出し側が
+  // 保持して渡す（3D球ビューの sdrag.near と同じ理屈。無いとドラッグ中に前後が跳ねる）。
+  // 円の外は方向を正規化して縁に貼り付ける。dist=0 付近は向きが定まらないので下限を敷く。
+  frontToDir(clientX, clientY, g, dist, back) {
+    const r = g.R * Math.max(0.05, dist);
+    let x = (clientX - g.cx) / r;
+    let y = -(clientY - g.cy) / r;
+    const n = Math.hypot(x, y);
+    if (n > 1) { x /= n; y /= n; }
+    const z = (back ? 1 : -1) * Math.sqrt(Math.max(0, 1 - x * x - y * y));
+    return this.fromCartesian(x, y, z);
+  },
+
+  // 幾何。cx/cy はクライアント座標（ポインタ座標と直接比べられる）。
+  frontGeom() {
+    const rect = this.els.front.getBoundingClientRect();
+    return {
+      rect,
+      cx: rect.left + rect.width / 2,
+      cy: rect.top + rect.height / 2,
+      R: Math.max(8, Math.min(rect.width, rect.height) / 2 - this.FRONT_PAD),
+    };
+  },
+
+  drawFront() {
+    const c = this.els.front;
+    if (!c) return;
+    const rect = c.getBoundingClientRect();
+    if (rect.width < 8 || rect.height < 8) return;   // 非表示中（RENDERER など）は描かない
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.round(rect.width * dpr);
+    const h = Math.round(rect.height * dpr);
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    const g2 = c.getContext('2d');
+    g2.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g2.clearRect(0, 0, rect.width, rect.height);
+
+    const g = { cx: rect.width / 2, cy: rect.height / 2, R: Math.max(8, Math.min(rect.width, rect.height) / 2 - this.FRONT_PAD) };
+
+    // 背景の円（dist=1 の輪郭。オブジェクトは dist ぶん内側に入る）
+    g2.fillStyle = '#101014';
+    g2.beginPath();
+    g2.arc(g.cx, g.cy, g.R, 0, Math.PI * 2);
+    g2.fill();
+    g2.strokeStyle = 'rgba(255,255,255,0.28)';
+    g2.lineWidth = 1;
+    g2.beginPath();
+    g2.arc(g.cx, g.cy, g.R, 0, Math.PI * 2);
+    g2.stroke();
+
+    // 水平線 = 仰角（±30°/±60°。dist=1 での高さ）。el=0（耳の高さ）だけ基準線として強調
+    for (const el of [-60, -30, 0, 30, 60]) {
+      const y = g.cy - g.R * Math.sin(Math.PI / 180 * el);
+      const half = g.R * Math.cos(Math.PI / 180 * el);
+      g2.strokeStyle = el === 0 ? 'rgba(120,170,255,0.30)' : 'rgba(255,255,255,0.10)';
+      g2.beginPath();
+      g2.moveTo(g.cx - half, y);
+      g2.lineTo(g.cx + half, y);
+      g2.stroke();
+    }
+    // 縦の中心線（真正面/真後ろの面）
+    g2.strokeStyle = 'rgba(255,255,255,0.10)';
+    g2.beginPath();
+    g2.moveTo(g.cx, g.cy - g.R);
+    g2.lineTo(g.cx, g.cy + g.R);
+    g2.stroke();
+
+    // ラベル。トップビューと同じくキャンバスの縁に固定で置く（外周に置くと見切れる）
+    g2.fillStyle = '#8b8b99';
+    g2.font = '10px Consolas, monospace';
+    g2.textBaseline = 'middle';
+    g2.textAlign = 'center';
+    g2.fillText('上 +90°', g.cx, Math.max(8, g.cy - g.R - 10));
+    g2.fillText('下 -90°', g.cx, Math.min(rect.height - 8, g.cy + g.R + 10));
+    g2.textAlign = 'left';
+    g2.fillText('左 +90°', 4, g.cy);
+    g2.textAlign = 'right';
+    g2.fillText('右 -90°', rect.width - 4, g.cy);
+    g2.textAlign = 'left';
+    g2.textBaseline = 'bottom';
+    g2.fillStyle = '#5f5f6b';
+    g2.fillText('横=左右 / 縦=高さ（距離はトップビュー）', 4, rect.height - 3);
+    g2.textBaseline = 'middle';
+
+    // 中央のリスナー（背後から見た後頭部。正面を向いているので鼻先は描かない）
+    g2.strokeStyle = '#8b8b99';
+    g2.beginPath();
+    g2.arc(g.cx, g.cy, 5, 0, Math.PI * 2);
+    g2.stroke();
+
+    // オブジェクト。後方（z>0）を先に描き、前方が上書きする＝実際の見え方と一致する。
+    // 選択中は最後に重ねて必ず手前に出す（トップビューと同じ流儀）。
+    const sel = DAW.objects.selected();
+    for (const pass of [true, false]) {
+      for (const obj of DAW.objects.list) {
+        if (obj === sel) continue;
+        const p = this.frontXY(obj.az, obj.el, obj.dist, g);
+        if (p.back === pass) this.drawFrontObject(g2, obj, p, false);
+      }
+    }
+    if (sel) this.drawFrontObject(g2, sel, this.frontXY(sel.az, sel.el, sel.dist, g), true);
+  },
+
+  drawFrontObject(g2, obj, p, isSel) {
+    const r = p.back ? 4.5 : 6;   // 後方は少し小さく描いて前後を区別する
+    const on = DAW.objects.effectiveGain(obj) > 0;   // ミュート/他がソロ中は薄く
+    g2.globalAlpha = (on ? 1 : 0.3) * (p.back ? 0.55 : 1);
+    g2.fillStyle = obj.color;
+    g2.beginPath();
+    g2.arc(p.x, p.y, r, 0, Math.PI * 2);
+    g2.fill();
+    g2.globalAlpha = 1;
+    if (obj.lock !== 'none') {           // 固定中は輪郭を破線にする（他ビューと同じ）
+      g2.strokeStyle = 'rgba(255,255,255,0.55)';
+      g2.setLineDash([2, 2]);
+      g2.beginPath();
+      g2.arc(p.x, p.y, r + 1.5, 0, Math.PI * 2);
+      g2.stroke();
+      g2.setLineDash([]);
+    }
+    if (!isSel) return;
+    g2.strokeStyle = '#fff';
+    g2.lineWidth = 2;
+    g2.beginPath();
+    g2.arc(p.x, p.y, r + 4, 0, Math.PI * 2);
+    g2.stroke();
+    g2.lineWidth = 1;
+    g2.fillStyle = '#fff';
+    g2.textAlign = 'center';
+    g2.textBaseline = 'bottom';
+    g2.font = '11px "Segoe UI", sans-serif';
+    g2.fillText(obj.name, p.x, p.y - r - 7);
+  },
+
+  // ポインタ位置に最も近いオブジェクト（FRONT_HIT_PX 以内）
+  frontHit(clientX, clientY, g) {
+    let best = null;
+    let bestD = this.FRONT_HIT_PX;
+    for (const obj of DAW.objects.list) {
+      const p = this.frontXY(obj.az, obj.el, obj.dist, g);
+      const d = Math.hypot(clientX - p.x, clientY - p.y);   // frontGeom の cx/cy はクライアント座標
+      if (d <= bestD) { bestD = d; best = obj; }
+    }
+    return best;
+  },
+
+  onFrontDown(e) {
+    if (e.button !== 0) return;
+    const g = this.frontGeom();
+    const hit = this.frontHit(e.clientX, e.clientY, g);
+    if (hit) DAW.objects.select(hit.id);
+    const obj = DAW.objects.selected();
+    if (!obj) return;
+    // 掴んだ時点の半球（前/後）を覚える。移動前の位置から決めること
+    // （frontMoveTo がこれを参照するので、fdrag を作ってから動かす）。
+    this.fdrag = { id: obj.id, back: DAW.objaudio.toCartesian(obj.az, obj.el, 1).z > 0, moved: false };
+    if (!hit) this.frontMoveTo(obj.id, e.clientX, e.clientY, g);   // 空きをクリック＝選択中を移動
+    try { this.els.front.setPointerCapture(e.pointerId); } catch (err) { /* 合成イベントでは失敗する */ }
+    this.render();
+  },
+
+  onFrontMove(e) {
+    if (!this.fdrag) return;
+    this.fdrag.moved = true;
+    this.frontMoveTo(this.fdrag.id, e.clientX, e.clientY, this.frontGeom());
+    this.render();
+  },
+
+  onFrontUp() {
+    if (!this.fdrag) return;
+    this.fdrag = null;
+    this.render();
+    DAW.history.commit();   // ドラッグ全体で 1 エントリ（トップビューと同じ方式）
+  },
+
+  // 距離は変えない（トップビュー側の担当）。lock されていれば setPosition が false を返す。
+  frontMoveTo(id, clientX, clientY, g) {
+    const obj = DAW.objects.get(id);
+    if (!obj) return false;
+    const back = this.fdrag ? this.fdrag.back : DAW.objaudio.toCartesian(obj.az, obj.el, 1).z > 0;
+    const d = this.frontToDir(clientX, clientY, g, obj.dist, back);
+    return DAW.objects.setPosition(id, d.az, d.el, null);
   },
 
   // ---- 3D球ビュー（自前の透視投影。ライブラリは使わない）----
