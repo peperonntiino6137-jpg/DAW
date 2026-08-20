@@ -267,6 +267,17 @@ DAW.objaudio = {
     };
   },
 
+  // 直交座標 → 極座標（toCartesian の逆）。半径は無視して方向だけ返す。
+  // 変換規約はこの2つに一本化する（UI もモデルのグループ回転もこれを使う。
+  // 式を複製すると片方だけ直したときに鏡像になる —— ビュー実装で踏んだ轍）。
+  fromCartesian(x, y, z) {
+    const n = Math.hypot(x, y, z) || 1;
+    return {
+      az: Math.atan2(-x / n, -z / n) * 180 / Math.PI,
+      el: Math.asin(Math.max(-1, Math.min(1, y / n))) * 180 / Math.PI,
+    };
+  },
+
   // 等パワーパンの L/R ゲイン。
   // ADM は「正 = 左」なので、az=+90 で左いっぱい、az=-90 で右いっぱいになる。
   // 仰角が上がるほど左右差を減らす（真上の音は左右中央に聞こえるため）。

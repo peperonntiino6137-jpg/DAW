@@ -26,6 +26,7 @@ DAW.history = {
         bpm: DAW.project.bpm,
         tracks: DAW.project.tracks,
         objects: DAW.objects.toJSON(),
+        objectGroups: DAW.objects.groupsToJSON(),   // グループのレジストリ（所属は objects 側の groupId）
         // マスターセクション（RENDERER のノブ）。プロジェクト保存の対象なので履歴にも入れる。
         // 出力形式やメトロノーム/グリッドは表示・再生側の設定なので入れない（ループと同じ扱い）。
         limiter: DAW.limiter.toJSON(),
@@ -81,6 +82,7 @@ DAW.history = {
     DAW.project.bpm = data.bpm != null ? data.bpm : 120;
     DAW.project.tracks = data.tracks;
     DAW.objects.load(data.objects);
+    DAW.objects.loadGroups(data.objectGroups);    // 必ず load の後（メンバー参照の整合を取る）
     DAW.limiter.load(data.limiter);               // 欠落は既定値（load が補完する）
     DAW.objaudio.loadRevParams(data.roomReverb);  // 同上（level=0 = 従来の音）
     DAW.audio.resetNodes();

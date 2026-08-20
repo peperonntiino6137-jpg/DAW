@@ -238,6 +238,9 @@ DAW.wav = {
       bpm: DAW.project.bpm,
       loop: { enabled: DAW.loop.enabled, start: DAW.loop.start, end: DAW.loop.end },
       objects: DAW.objects.toJSON(),
+      // グループのレジストリ。objects は配列のまま別キーに持つ（追加キーのみなので
+      // version:1 のまま互換。旧実装は objectGroups と groupId を無視してそのまま開ける）
+      objectGroups: DAW.objects.groupsToJSON(),
       // ルームリバーブのマスターパラメータ（RENDERER）。追加フィールドのみなので version:1 のまま互換
       roomReverb: Object.assign({}, DAW.objaudio.revParams),
       // マスターリミッター / 出力形式（明示選択のみ）/ メトロノーム / グリッド。
@@ -297,6 +300,7 @@ DAW.wav = {
       tracks: data.tracks,
     };
     DAW.objects.load(data.objects);   // 旧プロジェクトは objects を持たないので空になる
+    DAW.objects.loadGroups(data.objectGroups);   // 欠落は空。必ず load の後（メンバー参照の整合）
     DAW.objaudio.loadRevParams(data.roomReverb);   // 欠落は既定値（level=0 = 従来の音）で補完
     DAW.limiter.load(data.limiter);           // 欠落は既定値（有効・0dB/100ms/-1dB/5ms）で補完
     DAW.objaudio.loadOutput(data.output);     // 欠落はバイノーラル / 5.1（明示選択だけを復元）

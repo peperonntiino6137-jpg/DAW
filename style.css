@@ -667,6 +667,9 @@ input[type="range"] { accent-color: var(--accent); }
 .obj-strip.selected { background: #2b2b3a; box-shadow: inset 0 0 0 1px var(--accent); }
 #obj-master { position: relative; flex: none; border-left: 2px solid var(--border); background: var(--panel2); }
 
+/* グループ色帯（ストリップ最上部）。絶対配置なので flex レイアウトに影響しない */
+.os-group { position: absolute; left: 0; top: 0; right: 0; height: 3px; }
+
 .os-head { display: flex; align-items: center; gap: 4px; }
 .os-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--dim); }
 .os-name {

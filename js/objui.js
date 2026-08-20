@@ -287,6 +287,61 @@ DAW.objui = {
     return true;
   },
 
+  // ---- グループ（メニュー / 表示補助）----
+  //
+  // 所属の変更は DAW.objects.setGroup / createGroup 一本（ここはメニューを出すだけ）。
+  // undo はメニュー系の既存規約どおり操作1回 = commit 1回（新規作成は作成+追加で1回）。
+
+  openGroupMenu(x, y, id) {
+    const O = DAW.objects;
+    const obj = O.get(id);
+    if (!obj || !DAW.ui || !DAW.ui.showMenu) return;
+    const items = O.groups.map(g => ({
+      label: (obj.groupId === g.id ? '✓ ' : '') + `「${g.name}」へ追加（${O.groupMembers(g.id).length}個）`,
+      disabled: obj.groupId === g.id,
+      run: () => {
+        if (!O.setGroup(id, g.id)) return;
+        this.render();
+        DAW.history.commit();
+      },
+    }));
+    items.push({
+      label: '新しいグループを作って追加',
+      run: () => {
+        const g = O.createGroup();
+        if (!O.setGroup(id, g.id)) { O.pruneGroups(); return; }   // 直後の prune で空グループは残らない
+        this.render();
+        DAW.history.commit();   // 作成 + 追加で undo 1回
+      },
+    });
+    items.push({
+      label: 'グループから外す',
+      disabled: !obj.groupId,
+      run: () => {
+        if (!O.setGroup(id, null)) return;
+        this.render();
+        DAW.history.commit();
+      },
+    });
+    DAW.ui.showMenu(x, y, items);
+    if (DAW.ui.setHint) DAW.ui.setHint('グループ: 同じグループのメンバーはビュー上で Shift+ドラッグするとまとめて回転します（固定中・経路有効のメンバーは動きません）');
+  },
+
+  // 選択中オブジェクトと同じグループの「他の」メンバーか（3ビューの細枠表示に使う）
+  inSelGroup(obj) {
+    const sel = DAW.objects.selected();
+    return !!(sel && sel.groupId && obj !== sel && obj.groupId === sel.groupId);
+  },
+
+  // グループメンバーの細枠（選択リングと同色・細め。3ビュー共通）
+  drawGroupRing(g2, x, y, r) {
+    g2.strokeStyle = 'rgba(255,255,255,0.65)';
+    g2.lineWidth = 1;
+    g2.beginPath();
+    g2.arc(x, y, r + 3.5, 0, Math.PI * 2);
+    g2.stroke();
+  },
+
   // ---- トップビュー ----
 
   // 極座標 → 画面。0°=上（正面）、正=反時計回り。
@@ -467,7 +522,11 @@ DAW.objui = {
       g2.stroke();
       g2.setLineDash([]);
     }
-    if (!isSel) return;
+    if (!isSel) {
+      // 選択中オブジェクトと同じグループのメンバーは細枠で示す（Shift+ドラッグで一緒に回る面々）
+      if (this.inSelGroup(obj)) this.drawGroupRing(g2, p.x, p.y, r);
+      return;
+    }
     g2.strokeStyle = '#fff';
     g2.lineWidth = 2;
     g2.beginPath();
@@ -506,7 +565,8 @@ DAW.objui = {
     if (obj.path && obj.path.enabled) { this.render(); return; }
     // ドラッグ中は history.commit() を呼ばない。pointerup で1回だけ呼んで
     // 「ドラッグ開始〜終了で undo 1エントリ」にする（js/ui.js の startClipDrag と同じ方式）。
-    this.drag = { id: obj.id, moved: false };
+    // Shift+ドラッグ = グループ回転（無所属なら通常の単独移動と同じ）。
+    this.drag = { id: obj.id, moved: false, group: this.groupDragStart(e, obj) };
     if (!hit) this.moveTo(obj.id, e.clientX, e.clientY, g);   // 空きをクリック＝選択中を移動
     try { this.els.top.setPointerCapture(e.pointerId); } catch (err) { /* 合成イベントでは失敗する */ }
     this.render();
@@ -529,7 +589,20 @@ DAW.objui = {
   // lock されていれば setPosition が false を返すので、UI 側では何もしない（動かない）
   moveTo(id, clientX, clientY, g) {
     const p = this.xyToPos(clientX, clientY, g);
+    // グループ回転（Shift+ドラッグ）: az の差分を全メンバーへ（ヨー回転）。
+    // dist はポインタの距離成分を使わず各メンバーが維持する（うっかり全員の距離が揃わないように）。
+    if (this.drag && this.drag.group) return DAW.objects.rotateGroupAz(id, p.az);
     return DAW.objects.setPosition(id, p.az, null, p.dist);
+  },
+
+  // Shift+ドラッグでグループ回転を始めるか（3ビュー共通の判定 + ヒントバー連動）
+  groupDragStart(e, obj) {
+    const on = !!(e.shiftKey && obj.groupId && DAW.objects.getGroup(obj.groupId));
+    if (on && DAW.ui && DAW.ui.setHint) {
+      const g = DAW.objects.getGroup(obj.groupId);
+      DAW.ui.setHint(`グループ回転:「${g.name}」の ${DAW.objects.groupMembers(obj.groupId).length} 個をまとめて回します（距離は各自維持。固定中・経路有効のメンバーは動きません）`);
+    }
+    return on;
   },
 
   // ---- 経路（位置オートメーション）の編集 ----
@@ -1098,7 +1171,10 @@ DAW.objui = {
       g2.stroke();
       g2.setLineDash([]);
     }
-    if (!isSel) return;
+    if (!isSel) {
+      if (this.inSelGroup(obj)) this.drawGroupRing(g2, p.x, p.y, r);   // グループメンバーの細枠
+      return;
+    }
     g2.strokeStyle = '#fff';
     g2.lineWidth = 2;
     g2.beginPath();
@@ -1138,7 +1214,9 @@ DAW.objui = {
     if (obj.path && obj.path.enabled) { this.render(); return; }
     // 掴んだ時点の半球（前/後）を覚える。移動前の位置から決めること
     // （frontMoveTo がこれを参照するので、fdrag を作ってから動かす）。
-    this.fdrag = { id: obj.id, back: DAW.objaudio.toCartesian(obj.az, obj.el, 1).z > 0, moved: false };
+    // Shift+ドラッグ = グループ回転（トップビューと同じ流儀）。
+    this.fdrag = { id: obj.id, back: DAW.objaudio.toCartesian(obj.az, obj.el, 1).z > 0, moved: false,
+                   group: this.groupDragStart(e, obj) };
     if (!hit) this.frontMoveTo(obj.id, e.clientX, e.clientY, g);   // 空きをクリック＝選択中を移動
     try { this.els.front.setPointerCapture(e.pointerId); } catch (err) { /* 合成イベントでは失敗する */ }
     this.render();
@@ -1164,6 +1242,8 @@ DAW.objui = {
     if (!obj) return false;
     const back = this.fdrag ? this.fdrag.back : DAW.objaudio.toCartesian(obj.az, obj.el, 1).z > 0;
     const d = this.frontToDir(clientX, clientY, g, obj.dist, back);
+    // グループ回転（Shift+ドラッグ）: 掴んだ点 → ポインタ方向への最小回転を全メンバーへ
+    if (this.fdrag && this.fdrag.group) return DAW.objects.rotateGroupTo(id, d.az, d.el);
     return DAW.objects.setPosition(id, d.az, d.el, null);
   },
 
@@ -1221,14 +1301,10 @@ DAW.objui = {
     return this.project(DAW.objaudio.toCartesian(az, el, r == null ? 1 : r), g);
   },
 
-  // 直交座標 → 極座標（toCartesian の逆）。半径は無視して方向だけ返す。
+  // 直交座標 → 極座標。実装はレンダラー層（DAW.objaudio.fromCartesian）に一本化した
+  // （グループ回転がモデル層でも同じ変換を使うため。ここは既存呼び出し互換の委譲だけ）。
   fromCartesian(x, y, z) {
-    const n = Math.hypot(x, y, z) || 1;
-    const yy = Math.max(-1, Math.min(1, y / n));
-    return {
-      az: Math.atan2(-x / n, -z / n) * 180 / Math.PI,
-      el: Math.asin(yy) * 180 / Math.PI,
-    };
+    return DAW.objaudio.fromCartesian(x, y, z);
   },
 
   // 画面 → 単位球上の方向。near=true なら「カメラ側の半球」の交点を採る。
@@ -1475,7 +1551,10 @@ DAW.objui = {
       g2.stroke();
       g2.setLineDash([]);
     }
-    if (!isSel) return;
+    if (!isSel) {
+      if (this.inSelGroup(obj)) this.drawGroupRing(g2, p.x, p.y, r);   // グループメンバーの細枠
+      return;
+    }
     g2.strokeStyle = '#fff';
     g2.lineWidth = 2;
     g2.beginPath();
@@ -1513,8 +1592,9 @@ DAW.objui = {
     // 経路が有効なオブジェクトは通常モードでは選択のみ（位置は経路が決める）
     if (obj.path && obj.path.enabled) { this.render(); return; }
     // 掴んだ時点の半球を覚える。これが無いとドラッグ中に前後が跳ねる。
+    // Shift+ドラッグ = グループ回転（他ビューと同じ流儀）。
     const p = this.projectDir(obj.az, obj.el, g);
-    this.sdrag = { id: obj.id, near: p.depth <= g.cam.D, moved: false };
+    this.sdrag = { id: obj.id, near: p.depth <= g.cam.D, moved: false, group: this.groupDragStart(e, obj) };
     if (!hit) this.sphereMoveTo(obj.id, e.clientX, e.clientY, g);   // 空きをドラッグ＝選択中を動かす
     try { this.els.sphere.setPointerCapture(e.pointerId); } catch (err) { /* 合成イベントでは失敗する */ }
     this.render();
@@ -1538,6 +1618,8 @@ DAW.objui = {
   sphereMoveTo(id, clientX, clientY, g) {
     const near = this.sdrag ? this.sdrag.near : true;
     const d = this.unproject(clientX, clientY, g, near);
+    // グループ回転（Shift+ドラッグ）: 掴んだ点 → ポインタ方向への最小回転を全メンバーへ
+    if (this.sdrag && this.sdrag.group) return DAW.objects.rotateGroupTo(id, d.az, d.el);
     return DAW.objects.setPosition(id, d.az, d.el, null);
   },
 
@@ -1590,6 +1672,18 @@ DAW.objui = {
       DAW.objects.select(id);
       this.render();
     });
+    // 右クリック = グループメニュー（既存グループへ追加 / 新規作成 / 外す）
+    el.addEventListener('contextmenu', e => {
+      e.preventDefault();      // 既定メニューは出さない
+      e.stopPropagation();     // document 側の「他所での右クリックで閉じる」に届かせない
+      DAW.objects.select(id);
+      this.render();
+      this.openGroupMenu(e.clientX, e.clientY, id);
+    });
+
+    // グループ色帯（ストリップ最上部。無所属のときは出さない）
+    const band = document.createElement('div');
+    band.className = 'os-group';
 
     // 名前 + 識別色
     const head = document.createElement('div');
@@ -1698,11 +1792,11 @@ DAW.objui = {
     });
     ms.append(mute, solo);
 
-    el.append(head, track, nums, rev, lock, peak, fader, gain, ms);
+    el.append(band, head, track, nums, rev, lock, peak, fader, gain, ms);
     // 子要素の参照を控えておく（syncStrip はドラッグ中に毎フレーム走るので、
     // そのたびに querySelector を10回叩かない。js/ui.js の el._clip と同じ発想）。
     el._r = {
-      dot, name, track, lock, peak, fader, gain, mute, solo, revKnob,
+      band, dot, name, track, lock, peak, fader, gain, mute, solo, revKnob,
       az: nums.querySelector('.os-in-az'),
       el: nums.querySelector('.os-in-el'),
       width: nums.querySelector('.os-in-width'),
@@ -1758,6 +1852,14 @@ DAW.objui = {
     const act = document.activeElement;   // 入力中の欄は書き換えない（打鍵の邪魔をしない）
     el.classList.toggle('selected', obj.id === DAW.objects.selectedId);
     r.dot.style.background = obj.color;
+
+    // グループ色帯。無所属は非表示。tooltip で操作（Shift+ドラッグ）と除外条件を明示する
+    const grp = obj.groupId ? DAW.objects.getGroup(obj.groupId) : null;
+    r.band.style.display = grp ? '' : 'none';
+    if (grp) {
+      if (r.band.dataset.c !== grp.color) { r.band.dataset.c = grp.color; r.band.style.background = grp.color; }
+      r.band.title = `グループ「${grp.name}」: ビュー上で Shift+ドラッグするとグループごと回転（右クリックで変更。固定中・経路有効のメンバーは回転しない）`;
+    }
     if (r.name !== act) r.name.value = obj.name;
     r.name.disabled = obj.lock === 'all';
 
@@ -2258,6 +2360,7 @@ DAW.objui = {
       mixStr(o.name);
       mixStr(o.color);
       mixStr(String(o.trackId));   // 割り当ての undo / 奪い取りの巻き添えにセレクタが追従する
+      mixStr(String(o.groupId));   // 所属の undo に色帯・細枠が追従する。混ぜ忘れると再描画されない
       mix(o.az * 1000); mix(o.el * 1000); mix(o.dist * 10000);
       mix(o.width * 100); mix(o.gainDb * 100);
       mix(o.revSend * 1000);   // Rev センド。混ぜ忘れると undo 後にノブが追従しない
@@ -2270,6 +2373,13 @@ DAW.objui = {
         mix(p.t * 1000); mix(p.az * 1000); mix(p.el * 1000); mix(p.dist * 10000);
         mix(DAW.objects.EASES.indexOf(p.ease) + 1);
       }
+    }
+    // グループのレジストリ（undo / 読み込みでの名前・色の変化に色帯が追従する）
+    mix(DAW.objects.groups.length);
+    for (const g of DAW.objects.groups) {
+      mixStr(g.id);
+      mixStr(g.name);
+      mixStr(g.color);
     }
     // 経路の編集モード / waypoint 選択もビューの見た目を変える
     mix(this.pathEdit ? 1 : 0);

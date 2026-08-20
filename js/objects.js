@@ -17,6 +17,7 @@
 DAW.objects = {
   MAX: 128,
   list: [],            // オブジェクトの配列（単一の state。全ビューがこれを参照する）
+  groups: [],          // グループのレジストリ [{ id, name, color }]。所属は obj.groupId が持つ
   selectedId: null,    // 選択中のオブジェクトID
   onChange: null,      // 変更通知（レンダラーが購読して音へ反映する）
 
@@ -84,6 +85,7 @@ DAW.objects = {
       name: name || `オブジェクト ${this.list.length + 1}`,
       color: this.COLORS[this.list.length % this.COLORS.length],
       trackId: trackId || null,
+      groupId: null,   // 所属グループ（仕様外の追加フィールド。null = 無所属）
       path: { enabled: false, loop: false, points: [] },   // 経路（位置オートメーション）
     }, this.defaults());
     this.list.push(obj);
@@ -95,6 +97,7 @@ DAW.objects = {
     if (i < 0) return false;
     this.list.splice(i, 1);
     if (this.selectedId === id) this.selectedId = this.list.length ? this.list[Math.min(i, this.list.length - 1)].id : null;
+    this.pruneGroups();   // 最後のメンバーが消えたグループはレジストリから畳む
     return true;
   },
 
@@ -430,6 +433,149 @@ DAW.objects = {
     return true;
   },
 
+  // ---- グループ ----
+  //
+  // 複数のオブジェクトを束ねて「まとめて回す」ための仕組み。
+  // グループ本体はレジストリ（id / name / color だけ）で、位置や音量などの状態は
+  // 持たない —— 状態は各メンバーが持ち続けるので、既存の保存・undo・書き出しは
+  // メンバー単位のまま無改修で効く。所属は obj.groupId（追加フィールドのみ = 後方互換。
+  // 旧実装はこのフィールドと objectGroups キーを無視してそのまま開ける）。
+
+  getGroup(id) { return this.groups.find(g => g.id === id) || null; },
+
+  // グループの新規作成。名前省略時は「グループ N」。色はオブジェクトと同じパレットから順に取る
+  createGroup(name) {
+    const g = {
+      id: DAW.uid(),
+      name: name != null && String(name) ? String(name) : `グループ ${this.groups.length + 1}`,
+      color: this.COLORS[this.groups.length % this.COLORS.length],
+    };
+    this.groups.push(g);
+    return g;
+  },
+
+  // メンバーが1人もいないグループをレジストリから消す（メニューに空グループを残さない）。
+  // 所属変更・オブジェクト削除・読み込みの後に呼ぶ。
+  pruneGroups() {
+    this.groups = this.groups.filter(g => this.list.some(o => o.groupId === g.id));
+  },
+
+  // 所属の変更（groupId = null で外す）。存在しないグループへは入れない。
+  // lock は見ない: グルーピングは位置/パラメータの編集ではなく編成の操作
+  // （assignTrack と同じ扱い。lock='all' から外せないと編成が永久に固まる）。
+  setGroup(objId, groupId) {
+    const obj = this.get(objId);
+    if (!obj) return false;
+    const gid = groupId || null;
+    if (gid && !this.getGroup(gid)) return false;
+    if (obj.groupId === gid) return false;   // 変化なし
+    obj.groupId = gid;
+    this.pruneGroups();   // 元のグループが空になったら畳む
+    this.changed(obj);
+    return true;
+  },
+
+  groupMembers(groupId) { return groupId ? this.list.filter(o => o.groupId === groupId) : []; },
+
+  // グループ中心 = メンバーの平均方向（toCartesian 平均 → 正規化）。
+  // メンバーがいない/正反対の2点で平均がゼロベクトルに潰れたときは null。
+  groupCenter(groupId) {
+    const ms = this.groupMembers(groupId);
+    if (!ms.length) return null;
+    let x = 0;
+    let y = 0;
+    let z = 0;
+    for (const m of ms) {
+      const c = DAW.objaudio.toCartesian(m.az, m.el, 1);
+      x += c.x;
+      y += c.y;
+      z += c.z;
+    }
+    if (Math.hypot(x, y, z) < 1e-9) return null;
+    return DAW.objaudio.fromCartesian(x, y, z);
+  },
+
+  // ---- グループ回転 ----
+  //
+  // あるメンバーの位置ドラッグを「グループ全体の回転」として全メンバーへ適用する。
+  // どちらの回転も**全員へ同じ1つの回転**をかけるので、メンバー間の球面距離
+  // （相対配置）は厳密に保存され、グループ中心（平均方向）も同じ回転で付いてくる。
+  // dist は各メンバーが自分の値を維持する（回転は方向だけを変える）。
+  // 回転しないメンバー: lock（canEditPosition=false）と経路有効（位置は path が駆動中）。
+  // ドラッグの取っ掛かりのメンバー自身が動かせない場合は false（グループ全体が動かない）。
+
+  // 回転対象のメンバー列。anchor が動かせない/無所属なら null（= 回転そのものが不成立）
+  _groupRotTargets(memberId) {
+    const obj = this.get(memberId);
+    if (!this.canEditPosition(obj) || !obj.groupId) return null;
+    if (obj.path && obj.path.enabled) return null;
+    return this.groupMembers(obj.groupId)
+      .filter(m => this.canEditPosition(m) && !(m.path && m.path.enabled));
+  },
+
+  // 水平回転（ヨー）: トップビューのドラッグ用。ドラッグ中のメンバーの az の差分を
+  // 全メンバーの az へ足す。el・dist は変えない（真上からの図で仰角まで動くと驚くため）。
+  // az だけの平行移動は鉛直軸まわりの回転そのものなので、これも球面相対を保存する。
+  rotateGroupAz(memberId, az) {
+    const targets = this._groupRotTargets(memberId);
+    if (!targets) return false;
+    const obj = this.get(memberId);
+    const delta = (isFinite(+az) ? +az : obj.az) - obj.az;
+    for (const m of targets) {
+      const n = this.normalize(m.az + delta, m.el);
+      m.az = n.az;
+      m.el = n.el;
+      this.changed(m);
+    }
+    return true;
+  },
+
+  // 球面回転: 正面/3D球ビューのドラッグ用。ドラッグ中のメンバーの現在方向 u →
+  // 目標方向 v への**最小回転**（軸 = u×v、角 = ∠uv のロドリゲス回転）を全メンバーへ
+  // かける。最小回転は「v 軸まわりの余計なねじれ」を持たない一意な回転で、
+  // ドラッグした点はポインタへ正確に追従し、他のメンバーは相対配置を保って付いてくる。
+  rotateGroupTo(memberId, az, el) {
+    const targets = this._groupRotTargets(memberId);
+    if (!targets) return false;
+    const obj = this.get(memberId);
+    const t = this.normalize(az != null ? az : obj.az, el != null ? el : obj.el);
+    const u = DAW.objaudio.toCartesian(obj.az, obj.el, 1);
+    const v = DAW.objaudio.toCartesian(t.az, t.el, 1);
+    // 回転軸 k（単位ベクトル）と cosθ / sinθ
+    let kx = u.y * v.z - u.z * v.y;
+    let ky = u.z * v.x - u.x * v.z;
+    let kz = u.x * v.y - u.y * v.x;
+    let s = Math.hypot(kx, ky, kz);              // sinθ
+    let c = u.x * v.x + u.y * v.y + u.z * v.z;   // cosθ
+    if (s < 1e-9) {
+      if (c > 0) return true;   // u ≒ v: 動いていない（何もしない）
+      // u ≒ -v（正反対へ一気に跨いだ）: 軸が定まらないので u に直交する軸で 180° 回す。
+      // ドラッグは連続に動くので実質起きないが、API 直呼びでも壊れないようにする保険。
+      kx = -u.z; ky = 0; kz = u.x;               // u × (0,1,0)
+      let n = Math.hypot(kx, ky, kz);
+      if (n < 1e-9) { kx = 1; ky = 0; kz = 0; n = 1; }   // u が真上/真下なら x 軸
+      kx /= n; ky /= n; kz /= n;
+      s = 0;
+      c = -1;
+    } else {
+      kx /= s; ky /= s; kz /= s;
+    }
+    for (const m of targets) {
+      const p = DAW.objaudio.toCartesian(m.az, m.el, 1);
+      // ロドリゲスの回転公式: p' = p·cosθ + (k×p)·sinθ + k·(k·p)(1−cosθ)
+      const dot = kx * p.x + ky * p.y + kz * p.z;
+      const rx = p.x * c + (ky * p.z - kz * p.y) * s + kx * dot * (1 - c);
+      const ry = p.y * c + (kz * p.x - kx * p.z) * s + ky * dot * (1 - c);
+      const rz = p.z * c + (kx * p.y - ky * p.x) * s + kz * dot * (1 - c);
+      const d = DAW.objaudio.fromCartesian(rx, ry, rz);
+      const n = this.normalize(d.az, d.el);
+      m.az = n.az;
+      m.el = n.el;
+      this.changed(m);
+    }
+    return true;
+  },
+
   anySolo() { return this.list.some(o => o.solo); },
 
   // ミュート/ソロを織り込んだ実効ゲイン（線形）
@@ -438,10 +584,12 @@ DAW.objects = {
     return Math.pow(10, obj.gainDb / 20);
   },
 
-  // 保存用。仕様どおり極座標のまま出す。
+  // 保存用。仕様どおり極座標のまま出す。groupId は追加フィールドのみなので後方互換
+  // （旧実装の load は知らないフィールドを黙って捨て、グループ無しで開ける）。
   toJSON() {
     return this.list.map(o => ({
       id: o.id, name: o.name, color: o.color, trackId: o.trackId || null,
+      groupId: o.groupId || null,
       az: o.az, el: o.el, dist: o.dist, width: o.width,
       gainDb: o.gainDb, revSend: o.revSend, mute: !!o.mute, solo: !!o.solo, lock: o.lock,
       path: {
@@ -487,6 +635,8 @@ DAW.objects = {
         name: src.name != null ? String(src.name) : `オブジェクト ${i + 1}`,
         color: src.color || this.COLORS[i % this.COLORS.length],
         trackId: src.trackId || null,
+        groupId: src.groupId || null,   // 旧プロジェクトは持たない = 無所属で開く
+
         az: n.az,
         el: n.el,
         dist: this.clamp('dist', src.dist != null ? src.dist : d.dist),
@@ -512,8 +662,41 @@ DAW.objects = {
     return this.list;
   },
 
+  // グループレジストリの保存/読み込み。保存ファイル・履歴スナップショットでは
+  // objects と別キー（objectGroups）に持つ（objects は配列のまま = 旧実装でも開ける）。
+  groupsToJSON() {
+    return this.groups.map(g => ({ id: g.id, name: g.name, color: g.color }));
+  },
+
+  // 読み込み。欠落（旧プロジェクト）は空。壊れた要素は既定の名前・色で補う。
+  // **必ず load(objects) の後に呼ぶ**: メンバーの groupId がレジストリに無いグループを
+  // 指していたら既定値で作って補完し（手で編集されたファイル対策）、
+  // 逆にメンバーのいないグループは畳む —— 整合はここで取る。
+  loadGroups(arr) {
+    this.groups = (Array.isArray(arr) ? arr : []).map((g, i) => {
+      const src = g && typeof g === 'object' ? g : {};
+      return {
+        id: src.id ? String(src.id) : DAW.uid(),
+        name: src.name != null ? String(src.name) : `グループ ${i + 1}`,
+        color: src.color || this.COLORS[i % this.COLORS.length],
+      };
+    });
+    for (const o of this.list) {
+      if (o.groupId && !this.getGroup(o.groupId)) {
+        this.groups.push({
+          id: o.groupId,
+          name: `グループ ${this.groups.length + 1}`,
+          color: this.COLORS[this.groups.length % this.COLORS.length],
+        });
+      }
+    }
+    this.pruneGroups();
+    return this.groups;
+  },
+
   clear() {
     this.list = [];
+    this.groups = [];
     this.selectedId = null;
   },
 };
