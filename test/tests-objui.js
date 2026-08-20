@@ -301,8 +301,9 @@ objuiSuite('[28] オブジェクトUI', async (okf) => {
       && !!document.getElementById('obj-mmeter') && !!document.getElementById('obj-mdb')
       && !!document.getElementById('obj-bounce') && !!document.getElementById('obj-light')
       && !!document.getElementById('obj-ab') && !!document.getElementById('tab-metering'));
+    // METERING タブは実装済み（[43]）になったので disabled 群からは外れている
     okf('V.52 枠だけのものは無効化されている（押しても何も起きない）',
-      document.getElementById('obj-bypass').disabled && document.getElementById('tab-metering').disabled
+      document.getElementById('obj-bypass').disabled && !document.getElementById('tab-metering').disabled
       && document.getElementById('obj-ceiling').disabled);
     okf('V.53 マスターストリップがストリップ帯の右端にある',
       !!document.getElementById('obj-master')

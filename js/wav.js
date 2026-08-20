@@ -205,8 +205,18 @@ DAW.wav = {
         `OK: このまま書き出す / キャンセル: 中止`);
       if (!proceed) return;
     }
-    this.download(new Blob([this.encodeWav(rendered, { bitDepth: opt.bitDepth })], { type: 'audio/wav' }),
-      loop ? 'loop.wav' : 'mix.wav');
+    const filename = loop ? 'loop.wav' : 'mix.wav';
+    this.download(new Blob([this.encodeWav(rendered, { bitDepth: opt.bitDepth })], { type: 'audio/wav' }), filename);
+    // 書き出しレポート: 納品物（リミッター後・整列済み）の Integrated LUFS / True Peak
+    // （BS.1770-4。js/loudness.js の純関数をそのまま呼ぶ）。
+    // alert は出さない（既存の規約「書き出しでは alert を出さない」をテストが固定している）。
+    // ヒントバーへ流し、METERING タブの「書き出しレポート」にも残す。
+    const rep = DAW.loudness.analyze(rendered, rendered.sampleRate);
+    this.lastExportLoudness = { integrated: rep.integrated, truePeakDb: rep.truePeakDb, file: filename };
+    if (DAW.ui && DAW.ui.setHint) {
+      DAW.ui.setHint(`書き出しました: ${filename} — Integrated ${DAW.loudness.fmt(rep.integrated)} LUFS / ` +
+        `True Peak ${DAW.loudness.fmt(rep.truePeakDb)} dBTP`);
+    }
   },
 
   // プロジェクトを JSON（音声は WAV -> base64 埋め込み）で保存。
