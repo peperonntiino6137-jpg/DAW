@@ -803,8 +803,141 @@ DAW.ui = {
       { label: '複製', key: 'Ctrl+D', run: () => this.duplicateSelectedClip() },
       { label: '再生ヘッド位置で分割', key: 'S', disabled: !this.canSplitAtPlayhead(clip),
         run: () => this.splitSelectedClip() },
+      // ステム分離は1件ずつ（Worker がメモリを大量に使うため）。実行中は無効表示
+      { label: 'ステム分離', disabled: !!DAW.stems.running,
+        run: () => this.separateClipStems(clip.id) },
       { label: '削除', key: 'Delete', run: () => this.deleteSelectedClip() },
     ]);
+  },
+
+  // ---- ステム分離（AI で drums / bass / other / vocals の4トラックに分ける）----
+
+  // 進捗ダイアログ（モーダル）。実行中はこれ以外の操作をブロックする。
+  openStemsDialog(title) {
+    this.closeStemsDialog();
+    const overlay = document.createElement('div');
+    overlay.id = 'stems-modal';
+    const box = document.createElement('div');
+    box.className = 'stems-box';
+    const h = document.createElement('h3');
+    h.textContent = 'ステム分離';
+    const msg = document.createElement('div');
+    msg.className = 'stems-msg';
+    msg.textContent = `${title}: 準備中…`;
+    const bar = document.createElement('div');
+    bar.className = 'stems-bar';
+    const fill = document.createElement('i');
+    bar.appendChild(fill);
+    const count = document.createElement('div');
+    count.className = 'stems-count';
+    count.textContent = '';
+    const btn = document.createElement('button');
+    btn.className = 'stems-cancel';
+    btn.textContent = 'キャンセル';
+    btn.addEventListener('click', () => {
+      if (DAW.stems.running) {
+        btn.disabled = true;   // 二度押し防止。後始末は separate の reject 側で行う
+        DAW.stems.cancel();
+      } else {
+        this.closeStemsDialog();   // エラー表示状態では「閉じる」として働く
+      }
+    });
+    box.append(h, msg, bar, count, btn);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    return { overlay, msg, fill, count, btn, title };
+  },
+
+  updateStemsDialog(dlg, p) {
+    if (!dlg || !document.getElementById('stems-modal')) return;
+    if (p.phase === 'load') {
+      dlg.msg.textContent = `${dlg.title}: モデル読み込み中…`;
+      dlg.fill.style.width = '0%';
+      dlg.count.textContent = `${p.done} / ${p.total} ファイル`;
+    } else {
+      const pct = p.total > 0 ? Math.round(p.done / p.total * 100) : 0;
+      dlg.msg.textContent = `${dlg.title}: 分離中…`;
+      dlg.fill.style.width = pct + '%';
+      dlg.count.textContent = `セグメント ${p.done} / ${p.total}（${pct}%）`;
+    }
+  },
+
+  // エラーはダイアログ内に表示して「閉じる」で消してもらう（黙って閉じない）
+  showStemsError(dlg, err) {
+    if (!dlg || !document.getElementById('stems-modal')) return;
+    dlg.msg.textContent = (err && err.message) || String(err);
+    dlg.msg.classList.add('stems-err');
+    dlg.count.textContent = '';
+    dlg.btn.textContent = '閉じる';
+    dlg.btn.disabled = false;
+  },
+
+  closeStemsDialog() {
+    const m = document.getElementById('stems-modal');
+    if (m) m.remove();
+  },
+
+  // クリップを4ステムに分離して、元トラックの直下へ4トラックとして並べる。
+  // 元クリップはそのまま残す。実行は一度に1件だけ（DAW.stems.running が防ぐ）。
+  async separateClipStems(clipId) {
+    if (DAW.stems.running) return false;
+    const found = DAW.findClip(clipId);
+    if (!found) return false;
+    const clip = found.clip;
+    const buffer = DAW.buffers.get(clip.bufferId);
+    if (!buffer) return false;
+    // 実行中にクリップが動かされた場合に備えて必要な値を控えておく
+    const snap = { trackId: found.track.id, name: clip.name, startTime: clip.startTime };
+    const dlg = this.openStemsDialog(clip.name);
+    try {
+      const stems = await DAW.stems.separate(buffer, {
+        offset: clip.offset,
+        duration: clip.duration,
+        onProgress: p => this.updateStemsDialog(dlg, p),
+      });
+      const cur = DAW.findClip(clipId);   // 分離中の移動・削除に追従（消えていたら控えの値）
+      const at = cur || { track: { id: snap.trackId }, clip: snap };
+      this.placeStemTracks(at.track.id, at.clip.name != null ? at.clip : snap, stems);
+      this.closeStemsDialog();
+      return true;
+    } catch (err) {
+      if (err && err.code === 'cancelled') {
+        this.closeStemsDialog();
+      } else {
+        this.showStemsError(dlg, err);
+      }
+      return false;
+    }
+  },
+
+  // 4ステムを新規4トラックとして sourceTrackId の直下に挿し、クリップを同じ startTime に置く。
+  // 履歴は最後に commit 1回だけ（undo 1発で4トラックまとめて消える）。
+  placeStemTracks(sourceTrackId, clipInfo, stems) {
+    let idx = DAW.project.tracks.findIndex(t => t.id === sourceTrackId);
+    if (idx < 0) idx = DAW.project.tracks.length - 1;   // 元トラックが消されていたら末尾へ
+    const made = [];
+    DAW.stems.TRACKS.forEach((key, k) => {
+      const buf = stems[key];
+      const name = `${clipInfo.name} ${DAW.stems.STEM_LABELS[key]}`;
+      const track = {
+        id: DAW.uid(), name, volume: 1, pan: 0, muted: false, solo: false,
+        effects: [], clips: [],
+      };
+      track.clips.push({
+        id: DAW.uid(),
+        bufferId: DAW.registerBuffer(buf),
+        startTime: Math.max(0, clipInfo.startTime),
+        offset: 0,
+        duration: buf.duration,
+        name,
+      });
+      DAW.project.tracks.splice(idx + 1 + k, 0, track);
+      made.push(track);
+    });
+    this.renderTracks();
+    DAW.audio.reschedule();
+    DAW.history.commit();
+    return made;
   },
 
   // レーン空白部の右クリック。貼り付け先は右クリックしたレーンのトラックと時刻。
@@ -946,6 +1079,13 @@ DAW.ui = {
 
   async onDrop(e) {
     e.preventDefault();
+    // ステム分離モデル（htdemucs_embedded.onnx）のドロップ。models/ 未配置環境向けの搬入経路
+    const onnx = [...e.dataTransfer.files].find(f => /\.onnx$/i.test(f.name));
+    if (onnx) {
+      DAW.stems.setModelData(await onnx.arrayBuffer());
+      alert(`ステム分離モデルを読み込みました: ${onnx.name}`);
+      return;
+    }
     const files = [...e.dataTransfer.files].filter(f => this.isAudioFile(f));
     if (!files.length) return;
     const laneEl = e.target.closest('.lane');

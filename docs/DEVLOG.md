@@ -635,3 +635,82 @@ main.js のキーハンドラに書かれていた処理を `DAW.ui` の共通�
 width の2ソース追従 / ホールド定常値）、ライブは followPaths を applyObjPosition のスパイで、
 UI はトグル / 追加 / ドラッグ / ease / 削除 / lock / 通常ドラッグ不可まで。940/940 passed。
 `test/bench.js` に OB.11（128個 × 8点 × 300フレームの補間）を追加した。
+
+## AI ステム分離（`js/stems.js` / `vendor/` / `models/`・2026-08-20）
+
+クリップ右クリック →「ステム分離」で htdemucs（Demucs v4）による 4 ステム分離
+（drums / bass / other / vocals）を実装した。純 vanilla JS・ビルド不要・file:// で動く。
+
+### アーキテクチャ
+
+```
+UI (ui.js)                    メインスレッド (stems.js)             Blob Worker ×1〜4
+  右クリック → separateClipStems   OfflineAudioContext で 44.1kHz/2ch 化
+  進捗ダイアログ / キャンセル    →  セグメント切り出し（343,980 spl,      importScripts(ort blob)
+  完了で4トラック配置 + commit1回    ストライド 257,985 = 25% 重なり）  →  STFT → ONNX 推論 → iSTFT
+                                窓合成（線形クロスフェード+重み正規化）←  = 全 DSP は Worker 内
+```
+
+- モデル: `htdemucs_embedded.onnx`（fp32 172MB、STFT 外出し・重み埋込。timcsy/demucs-web-onnx 由来、MIT）。
+- ランタイム: onnxruntime-web 1.27.0 の **wasm 専用ビルド `ort.wasm.min.js`**。
+  フルビルド `ort.min.js` は file:// で jsep（WebGPU モジュール）を要求して失敗する（スパイクで実証）。
+- 性能実測: 1 Worker で実時間の 1.76 倍速、4 Worker で 3.7 倍スケール。メモリ ≈2.7GB/Worker なので
+  並列数は hardwareConcurrency / deviceMemory / performance.memory から 1〜4 に自動調整（`autoWorkers()`）。
+
+### file:// で AI モデルを動かす方法（重要・再利用可）
+
+fetch/XHR はローカルファイルに使えないが、`<script src>` は file:// でも読める。そこで:
+
+1. モデル・ort ランタイム・wasm を **base64 を代入するだけの classic script** に変換して
+   `vendor/*.b64.js`・`models/htdemucs/model-*.b64.js`（24MB 分割 ×8、base64 後も 100MB 未満/ファイル）に置く。
+   グローバルは `DAW_STEMS_ASSETS` の1名前空間のみ。再生成は `models/gen_b64.py`（手順は models/README.md）。
+2. 分離実行時に **script タグを動的注入**して読み、デコード後は base64 文字列と script タグを捨てる
+   （デコード実測 0.5s / ピーク時ヒープ +1.2GB → 解放後 ≈0.6GB）。起動時には一切読まないので通常利用に影響なし。
+3. Worker は Blob URL から生成。中で `importScripts(blobURL)` → `ort.env.wasm.wasmPaths={mjs: blobURL}` +
+   `ort.env.wasm.wasmBinary=ArrayBuffer` で **ランタイム内部の fetch を完全回避**。
+4. DSP（STFT 等）は ES module にできない（file:// の Worker では import 不可）ので、
+   `dspFactory.toString()` で Worker ソースへ文字列として埋め込む自己完結関数にした。
+   ページ側でも同じ factory から `DAW.stems.dsp` を作るのでテストは Worker 無しで数値検証できる。
+5. モデルの Worker への受け渡しは postMessage の**コピー**（transfer は1本にしか渡せない）。
+
+### モデル I/O と DSP の落とし穴
+
+- 入力: `input` [1,2,343980] 波形 + `x` [1,4,2048,336] スペクトログラム（ch 順 = L実/L虚/R実/R虚）。
+- 出力: `output` [1,4,4,2048,336]（周波数分岐）+ `add_67` [1,4,2,343980]（時間分岐）。
+  **最終ステム = add_67 + iSTFT(output)**。時間分岐だけだと分離が甘い（周波数分岐が主役）。
+- STFT: FFT4096 / hop1024 / hann / 1/√n 正規化。pad は reflect 1536 + 右端数、さらに center 2048。
+  STFT 後は Nyquist ビンと前後 2 フレームを捨てて 2048×336 に揃える。
+- iSTFT 後は **offset 3584（= 2048 + 1536）から切り出す**。PyTorch istft(center=True) の暗黙オフセット。
+  ここを外すと先頭が無音になり全体がずれる。テスト S.6 が spec→ispec 往復（誤差 2e-7）で固定している。
+- 窓合成: 線形クロスフェード窓（ストライドの半分で立ち上げ/落とし）を掛けて加算し、最後に重み和で正規化。
+  恒等推論なら入力が復元される（S.11。ただし weights=0 になる先頭 1 サンプルだけは 0）。
+
+### UI / 履歴
+
+- 実行中はモーダル進捗ダイアログ（% とセグメント数、キャンセルボタン）。二重起動は
+  `DAW.stems.running` で防ぎ、メニュー項目も実行中は disabled。
+- キャンセルは `worker.terminate()` 即時。エンジンは各 await と「reject するだけの cancelPromise」を
+  race させているので、どの段階でも即座に戻る（err.code='cancelled'）。
+- 完了で元トラックの直下に「(クリップ名) Drums/Bass/Other/Vocals」の4トラックを挿し、同じ startTime に
+  クリップを置く。元クリップはそのまま。**commit は最後に1回**（undo 1発で4トラックまとめて消える）。
+- モデル未配置なら err.code='model-missing' と「htdemucs_embedded.onnx をドロップ」誘導。
+  タイムラインへの .onnx ドロップで `DAW.stems.setModelData()` に搬入できる。
+- バックエンドは `DAW.stems.backends` に `separate(buffer, opts, handle)` を登録する形で差し替え可能
+  （将来の Python サイドカー連携用の最小の抽象。現状は 'onnx' のみ）。
+
+### exe 同梱の結論
+
+`build/build-exe.ps1` を拡張し、`vendor/*.b64.js` + `models/**/*.js` も `/resource` で埋め込むようにした。
+**csc は 247MB の埋め込みでも約 1 秒で成功**（.NET リソースは 2GB まで）。ランチャー（launcher.cs）は
+無変更で動く（起動時に全リソースを %LOCALAPPDATA%\DAW\app へ展開する方式なので、models/ も一緒に出てくる。
+展開が毎回 250MB になる点だけ留意）。`-NoModels` でモデル抜きのスリム exe も作れる
+（その場合は .onnx ドロップで供給）。DAW.exe 本体は Windows のアプリ制御でブロック中のため実行確認は保留。
+
+### 検証
+
+`test/tests-stems.js`（グループ [38]・38 項目）: STFT/iSTFT 往復（2.4e-7）/ spec→ispec 往復
+（offset 3584 の検証）/ 恒等モック推論でセグメント分割+窓合成の恒等性 / offset・duration /
+トラック配置・命名・undo/redo 粒度 / UI 経路（ダイアログ・エラー表示）/ キャンセル / 二重起動 /
+model-missing 誘導 / .onnx ドロップ。実モデルは重いので既定スイートでは走らせず、
+**`--bench` 時のみスモーク 1 本**（2 秒素材 → 実推論 16s、4 ステムとも有限・非無音を確認済み）。
+978/978 passed（--bench 時 1007/1007）。

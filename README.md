@@ -19,6 +19,7 @@
 - **ループ再生**: ⟲ ボタンまたは L キー。ルーラーを Shift+ドラッグすると区間を引ける（グリッド有効時はスナップ、Alt で一時解除）。区間の繰り返しは事前予約するので継ぎ目が揺れない
 - **メトロノーム**: ♩ ボタンまたは M キー。BPM に従って再生・録音中にクリックを鳴らす（小節頭だけ高い音）。マスター音量とは独立した経路なので、WAV 書き出しには混入しない
 - **録音**: ● ボタンまたは R キーでマイク録音。テイクごとに新しいトラックへ記録し、録音中は既存トラックが再生されるので重ね録りできる（AudioWorklet で生 PCM を取得。圧縮往復なし）
+- **ステム分離**: クリップを右クリック →「ステム分離」で、AI（htdemucs）が drums / bass / other / vocals の4トラックに分離して元トラックの直下に並べる（詳細は下の「AI ステム分離」）
 - **WAV書き出し**: 全トラックをミックスして `mix.wav` をダウンロード。0dBFS を超えていれば書き出し前に警告する。ループ区間が有効なときはその区間だけを `loop.wav` として書き出す（ボタンの表示も変わる）
 - **保存 / 開く**: プロジェクトを JSON 1 ファイルで保存・復元（音声データも埋め込み）
 
@@ -57,6 +58,27 @@ powershell -ExecutionPolicy Bypass -File build\build-exe.ps1
 ```
 
 Windows 標準の csc.exe（.NET Framework）だけでビルドできる。ツールのインストール不要。**HTML/CSS/JS を変更したら再ビルドすること**（exe はビルド時点のファイルを内蔵するため）。
+
+ステム分離のモデル（約 250MB）も既定で埋め込まれる。モデル抜きの軽い exe が欲しければ `-NoModels` を付ける（その場合、ステム分離は `htdemucs_embedded.onnx` をタイムラインへドロップすれば使える）。
+
+## AI ステム分離
+
+クリップの右クリックメニューから、htdemucs（Demucs v4 hybrid transformer）による 4 ステム分離を実行できる。すべてブラウザ内で完結し、サーバーへの送信は一切ない（file:// でも動く）。
+
+- 分離は Web Worker（最大4並列。コア数とメモリから自動調整）で行い、実行中も UI は操作できる。進捗ダイアログのキャンセルで即時中断
+- 処理時間の目安: 実時間の 1/2〜1/4（例: 3.5 分の曲で 1〜2 分）。メモリを数 GB 使うので、他の重いタブは閉じておくとよい
+- 完了すると元トラックの直下に「(クリップ名) Drums / Bass / Other / Vocals」の4トラックができる。元クリップはそのまま。「元に戻す」1回で4トラックまとめて消える
+- モデル（`models/htdemucs/`、約 240MB）は分離を実行した時だけ読み込まれる。モデルが未配置の環境では、[htdemucs_embedded.onnx](https://huggingface.co/timcsy/demucs-web-onnx) をタイムラインへドロップすれば使える
+
+### クレジットとライセンス
+
+ステム分離は以下の成果物を利用している（いずれも MIT ライセンス）:
+
+- [Demucs](https://github.com/facebookresearch/demucs)（Meta AI Research）— モデル構造と学習済み重み
+- [demucs-web-onnx / demucs-web](https://huggingface.co/timcsy/demucs-web-onnx)（timcsy）— ONNX 変換（STFT 外出し）とブラウザ用 DSP 実装
+- [onnxruntime-web](https://github.com/microsoft/onnxruntime)（Microsoft）— 推論ランタイム（wasm）
+
+**注意**: 分離した音源の権利は元の楽曲に従う。市販楽曲の分離結果の公開・配布には元楽曲の権利者の許諾が必要になる。詳細は `models/README.md` を参照。
 
 ## プラグインの追加
 
@@ -109,7 +131,7 @@ AudioWorklet など非同期初期化が必要なプラグインは、オプシ�
 ## テスト
 
 `bash test/run.sh` で Headless Chrome による回帰テストを実行する（node 不要。Google Chrome と python3 のみ）。
-現在 738 項目・約8秒。失敗があれば exit 1 を返す。
+現在 978 項目・約8秒。失敗があれば exit 1 を返す。
 テストページは `index.html` から生成するため、DOM やスクリプト構成の変更に自動で追従する。
 スイートを追加するときは `test/tests-<名前>.js` を置くだけでよい（詳しくは `test/README.md`）。
 

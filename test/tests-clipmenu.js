@@ -87,7 +87,7 @@ clipmenuSuite('[36] 右クリックメニューと編集ボタン', async (okf) 
   DAW.audio.playheadPos = 0;
   const notPrevented = rmenu(clipEl(c1.id));
   okf('M.1 クリップの右クリックでメニューが出る（既定メニューは抑止）', !!menu() && notPrevented === false);
-  okf('M.2 項目は5つ（カット/コピー/複製/分割/削除）', items().length === 5,
+  okf('M.2 項目は6つ（カット/コピー/複製/分割/ステム分離/削除）', items().length === 6,
     items().map(b => b.firstChild.textContent).join('/'));
   okf('M.3 右クリックしたクリップが選択される', ui.selectedClipId === c1.id);
   okf('M.4 ショートカット表記が右側に付く',

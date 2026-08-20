@@ -295,6 +295,47 @@ input[type="range"] { accent-color: var(--accent); }
 #ctx-menu .ctx-key { font-family: Consolas, monospace; font-size: 10px; color: var(--dim); }
 #ctx-menu .ctx-item:hover:not(:disabled) .ctx-key { color: rgba(255, 255, 255, 0.85); }
 
+/* ステム分離の進捗ダイアログ（モーダル）。メニュー（z:30）より手前 */
+#stems-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#stems-modal .stems-box {
+  width: 340px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+#stems-modal h3 { font-size: 13px; font-weight: 600; }
+#stems-modal .stems-msg { font-size: 12px; color: var(--dim); word-break: break-word; }
+#stems-modal .stems-msg.stems-err { color: #e08a8a; }
+#stems-modal .stems-bar {
+  height: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+#stems-modal .stems-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+#stems-modal .stems-count { font-size: 11px; color: var(--dim); font-family: Consolas, monospace; }
+#stems-modal .stems-cancel { align-self: flex-end; font-size: 12px; padding: 4px 14px; }
+
 /* lanes & clips */
 .lane {
   position: relative;
