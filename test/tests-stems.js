@@ -304,7 +304,8 @@ stemsSuite('[38] ステム分離', async (okf) => {
   {
     DAW.stems.BASE = DAW.stems.BASE + 'no-such-dir/';   // アセットが見つからない状況を作る
     let err = null;
-    await DAW.stems.separate(makeBuf(1, testFill), {}).catch(e => { err = e; });
+    // backend 明示: サイドカー検出に流れると（開発中に実サーバが居た場合）結果が変わるため
+    await DAW.stems.separate(makeBuf(1, testFill), { backend: 'onnx' }).catch(e => { err = e; });
     okf('S.33 モデル未配置なら model-missing と「ドロップ」誘導を返す',
       err && err.code === 'model-missing' && /ドロップ/.test(err.message), err && err.message);
     okf('S.34 失敗後も running が解除される', DAW.stems.running === null);
@@ -331,6 +332,240 @@ stemsSuite('[38] ステム分離', async (okf) => {
   }
 
   okf('S.36 全工程で未捕捉エラーなし', H.errors.length === 0, H.errors.join('|'));
+});
+
+// =====================================================================
+// [38] Python サイドカーバックエンド（tools/stems-sidecar/ 連携）。
+// 実サーバは既定スイートでは起動しない。fetch は DAW.stems.backends.python._fetch
+// の1点に集約されているので、そこをモックして検出・フレーミング・キャンセル・
+// エラー表示を検証する（window.fetch は触らない: ハーネスの結果送信が壊れるため）。
+// =====================================================================
+stemsSuite('[38] Python サイドカー', async (okf) => {
+  const S = DAW.stems;
+  const PY = S.backends.python;
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+
+  const makeBuf = (seconds, fill) => {
+    const len = Math.round(seconds * 44100);
+    const buf = new AudioBuffer({ numberOfChannels: 2, length: len, sampleRate: 44100 });
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      for (let i = 0; i < len; i++) d[i] = fill(i, ch);
+    }
+    return buf;
+  };
+  const constFill = v => () => v;
+
+  const saved = { fetch: PY._fetch, poll: PY.POLL_INTERVAL, onnxSep: S.backends.onnx.separate };
+  try {
+    // ---- モック用ヘルパ ----
+    const jsonRes = (obj, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => obj });
+    const binRes = ab => ({ ok: true, status: 200, arrayBuffer: async () => ab });
+    const route = routes => {
+      PY._fetch = (url, init) => Promise.resolve().then(() => {
+        const h = routes[url.replace(PY.URL, '').split('?')[0]];
+        if (!h) throw new TypeError('Failed to fetch');
+        return h(init, url);
+      });
+    };
+    // サイドカーと同じ "DAWS" フレーミングの合成バイナリを作る（JSON + WAV 連結）
+    const frame = pairs => {
+      const wavs = pairs.map(([name, buf]) => [name, new Uint8Array(DAW.wav.encodeWav16(buf))]);
+      let off = 0;
+      const entries = wavs.map(([name, u8]) => { const e = { name, offset: off, length: u8.length }; off += u8.length; return e; });
+      const hdr = new TextEncoder().encode(JSON.stringify({ stems: entries }));
+      const out = new Uint8Array(8 + hdr.length + off);
+      out.set([0x44, 0x41, 0x57, 0x53], 0);   // "DAWS"
+      new DataView(out.buffer).setUint32(4, hdr.length, true);
+      out.set(hdr, 8);
+      let p = 8 + hdr.length;
+      for (const [, u8] of wavs) { out.set(u8, p); p += u8.length; }
+      return out.buffer;
+    };
+
+    // ---- DAWS フレーミングのパース（合成バイナリで往復） ----
+    {
+      const vals = { drums: 0.25, bass: -0.5, other: 0.1, vocals: 0.9 };
+      const ab = frame(S.TRACKS.map(k => [k, makeBuf(0.1, constFill(vals[k]))]));
+      const parsed = PY.parseFrame(ab);
+      const len = Math.round(0.1 * 44100);
+      okf('P.1 パース結果は4ステムとも 44.1kHz/2ch/正しい長さの AudioBuffer',
+        S.TRACKS.every(k => parsed[k] instanceof AudioBuffer && parsed[k].sampleRate === 44100
+          && parsed[k].numberOfChannels === 2 && parsed[k].length === len));
+      const errs = S.TRACKS.map(k => Math.abs(parsed[k].getChannelData(0)[50] - vals[k]));
+      okf('P.2 int16 WAV 往復の値が一致（±1/32768 程度）',
+        errs.every(e => e < 1e-3), errs.map(e => e.toExponential(1)).join(','));
+      let code = null;
+      try { PY.parseFrame(new Uint8Array([1, 2, 3, 4, 0, 0, 0, 0]).buffer); } catch (e) { code = e.code; }
+      okf('P.3 magic 不一致は sidecar エラーで拒否', code === 'sidecar');
+    }
+
+    // ---- 検出成功 → python バックエンドで一連の分離 ----
+    {
+      PY.POLL_INTERVAL = 10;   // テストでは高速にポーリングさせる
+      const src = makeBuf(0.5, i => 0.3 * Math.sin(2 * Math.PI * 440 * i / 44100));
+      const framed = frame(S.TRACKS.map(k => [k, makeBuf(0.5, constFill(0.5))]));
+      let postedBody = null, backendUsed = null;
+      const events = [];
+      route({
+        '/ping': () => jsonRes({ ok: true, version: '4.1.0', model: 'htdemucs', busy: false }),
+        '/progress': () => jsonRes({ running: true, progress: 0.42, stage: 'separating', error: null }),
+        '/separate': init => { postedBody = init.body; return wait(60).then(() => binRes(framed)); },
+        '/cancel': () => jsonRes({ ok: true, cancelled: false }),
+      });
+      const stems = await S.separate(src, {
+        onBackend: b => { backendUsed = b; },
+        onProgress: p => events.push(p),
+      });
+      okf('P.4 /ping 検出成功で python バックエンドが選ばれる', backendUsed === 'python');
+      const dv = postedBody && new DataView(postedBody);
+      const lenIn = Math.round(0.5 * 44100);
+      okf('P.5 POST body は 44.1kHz/16bit ステレオ WAV（既存エンコーダ再利用）',
+        dv && dv.byteLength === 44 + lenIn * 4
+        && String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3)) === 'RIFF'
+        && dv.getUint32(24, true) === 44100 && dv.getUint16(22, true) === 2,
+        'bytes=' + (dv && dv.byteLength));
+      okf('P.6 4ステムの AudioBuffer が返る',
+        S.TRACKS.every(k => stems[k] instanceof AudioBuffer && stems[k].length === lenIn));
+      okf('P.7 進捗は /progress ポーリング由来の percent 形式（0 → 42 → 100）',
+        events.length >= 2 && events[0].done === 0 && events[events.length - 1].done === 100
+        && events.every(p => p.phase === 'separate' && p.unit === 'percent' && p.total === 100)
+        && events.some(p => p.done === 42),
+        JSON.stringify(events.map(p => p.done)));
+      okf('P.8 完了後は running が解除される', S.running === null);
+      PY.POLL_INTERVAL = saved.poll;
+    }
+
+    // ---- 検出失敗 → ブラウザ内処理（onnx）へフォールバック ----
+    {
+      PY._fetch = () => Promise.reject(new TypeError('Failed to fetch'));   // 接続拒否を模す
+      const SENTINEL = { fallback: true };
+      S.backends.onnx.separate = async () => SENTINEL;
+      let backendUsed = null;
+      const r = await S.separate(makeBuf(0.1, constFill(0)), { onBackend: b => { backendUsed = b; } });
+      okf('P.9 検出失敗（接続拒否）で onnx へフォールバック', r === SENTINEL && backendUsed === 'onnx');
+      S.backends.onnx.separate = saved.onnxSep;
+    }
+
+    // ---- キャンセル（fetch abort + POST /cancel の併用） ----
+    {
+      let cancelPosted = false, started;
+      const startedP = new Promise(r => { started = r; });
+      route({
+        '/ping': () => jsonRes({ ok: true }),
+        '/progress': () => jsonRes({ running: false, progress: 0, stage: 'idle', error: null }),
+        '/cancel': () => { cancelPosted = true; return jsonRes({ ok: true, cancelled: true }); },
+        '/separate': init => new Promise((resolve, reject) => {
+          started();
+          init.signal.addEventListener('abort',
+            () => reject(new DOMException('The user aborted a request.', 'AbortError')));
+        }),
+      });
+      let code = null;
+      const p = S.separate(makeBuf(0.2, constFill(0.1)), {}).catch(e => { code = e.code; });
+      await startedP;    // POST が始まるまで待ってからキャンセル
+      S.cancel();
+      await p;
+      okf('P.10 キャンセルで abort され POST /cancel も飛ぶ（code=cancelled）',
+        code === 'cancelled' && cancelPosted);
+      okf('P.11 キャンセル後に running が解除される', S.running === null);
+    }
+
+    // ---- サーバ側ステータス（499 / 500）とネットワーク断 ----
+    {
+      const base = {
+        '/ping': () => jsonRes({ ok: true }),
+        '/progress': () => jsonRes({ running: false }),
+        '/cancel': () => jsonRes({ ok: true }),
+      };
+      route(Object.assign({}, base, { '/separate': () => jsonRes({ error: 'cancelled' }, 499) }));
+      let code = null;
+      await S.separate(makeBuf(0.1, constFill(0)), {}).catch(e => { code = e.code; });
+      okf('P.12 サーバ側 499 も cancelled として扱う', code === 'cancelled');
+
+      route(Object.assign({}, base, { '/separate': () => jsonRes({ error: 'demucs exited with code 1' }, 500) }));
+      let err = null;
+      await S.separate(makeBuf(0.1, constFill(0)), {}).catch(e => { err = e; });
+      okf('P.13 500 は sidecar エラーで本文の理由も表示に含む',
+        err && err.code === 'sidecar' && /500/.test(err.message) && /demucs exited/.test(err.message),
+        err && err.message);
+
+      route(Object.assign({}, base, { '/separate': () => { throw new TypeError('Failed to fetch'); } }));
+      err = null;
+      await S.separate(makeBuf(0.1, constFill(0)), {}).catch(e => { err = e; });
+      okf('P.14 分離中のネットワーク断は network エラー',
+        err && err.code === 'network' && /通信できません/.test(err.message), err && err.message);
+    }
+
+    // ---- UI 経路: バックエンド表示 / 409 busy / 完了で4トラック配置 ----
+    {
+      DAW.project.tracks = [];
+      const t0 = DAW.addTrack('A');
+      const srcBuf = makeBuf(0.3, constFill(0.2));
+      const clip = { id: DAW.uid(), bufferId: DAW.registerBuffer(srcBuf), startTime: 0, offset: 0, duration: 0.3, name: 'mix' };
+      t0.clips.push(clip);
+      DAW.ui.renderTracks();
+      DAW.history.reset();
+
+      // 409 busy: 実行中の様子（Python 高速処理の表示）も /separate 到達時に覗いて確かめる
+      let msgDuring = '';
+      route({
+        '/ping': () => jsonRes({ ok: true, busy: true }),
+        '/progress': () => jsonRes({ running: true, progress: 0.5 }),
+        '/separate': () => {
+          const el = document.querySelector('#stems-modal .stems-msg');
+          msgDuring = el ? el.textContent : '';
+          return jsonRes({ error: 'busy' }, 409);
+        },
+        '/cancel': () => jsonRes({ ok: true }),
+      });
+      const ok1 = await DAW.ui.separateClipStems(clip.id);
+      const modal = document.getElementById('stems-modal');
+      okf('P.15 実行中ダイアログに「Python 高速処理」と表示される', /Python 高速処理/.test(msgDuring), msgDuring);
+      okf('P.16 409 busy はダイアログにエラー表示され「閉じる」になる',
+        ok1 === false && modal && modal.querySelector('.stems-msg.stems-err')
+        && /実行中/.test(modal.querySelector('.stems-msg').textContent)
+        && modal.querySelector('.stems-cancel').textContent === '閉じる',
+        modal ? modal.querySelector('.stems-msg').textContent : 'モーダルなし');
+      if (modal) modal.querySelector('.stems-cancel').click();
+      okf('P.17 「閉じる」で消えて状態が残らない',
+        !document.getElementById('stems-modal') && S.running === null
+        && DAW.project.tracks.length === 1 && !DAW.history.canUndo());
+
+      // 完了経路: 分離結果の後段（4トラック配置・undo 1回）は既存経路がそのまま働く
+      const framed = frame(S.TRACKS.map(k => [k, makeBuf(0.3, constFill(0.25))]));
+      route({
+        '/ping': () => jsonRes({ ok: true }),
+        '/progress': () => jsonRes({ running: true, progress: 0.5 }),
+        '/separate': () => binRes(framed),
+        '/cancel': () => jsonRes({ ok: true }),
+      });
+      const ok2 = await DAW.ui.separateClipStems(clip.id);
+      okf('P.18 完了で4トラック配置・undo 1回ぶん（既存経路の再利用）',
+        ok2 === true && DAW.project.tracks.length === 5 && DAW.history.past.length === 1
+        && DAW.project.tracks.map(t => t.name).join('|') === 'A|mix Drums|mix Bass|mix Other|mix Vocals',
+        DAW.project.tracks.map(t => t.name).join('|'));
+      await DAW.history.undo();
+    }
+
+    // ---- percent 進捗の表示ユニット ----
+    {
+      const dlg = DAW.ui.openStemsDialog('song');
+      DAW.ui.setStemsBackend(dlg, 'python');
+      DAW.ui.updateStemsDialog(dlg, { phase: 'separate', unit: 'percent', done: 42, total: 100 });
+      okf('P.19 percent 進捗は「42%」表記でバーも 42%・バックエンド名も出る',
+        dlg.count.textContent === '42%' && dlg.fill.style.width === '42%'
+        && /Python 高速処理/.test(dlg.msg.textContent),
+        dlg.msg.textContent + ' / ' + dlg.count.textContent);
+      DAW.ui.closeStemsDialog();
+    }
+
+    okf('P.20 全工程で未捕捉エラーなし', H.errors.length === 0, H.errors.join('|'));
+  } finally {
+    PY._fetch = saved.fetch;
+    PY.POLL_INTERVAL = saved.poll;
+    S.backends.onnx.separate = saved.onnxSep;
+  }
 });
 
 // =====================================================================

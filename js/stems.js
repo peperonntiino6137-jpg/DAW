@@ -31,15 +31,19 @@ DAW.stems = {
 
   running: null,   // 実行中ハンドル（null なら待機中）。二重起動はここで防ぐ
 
-  // 分離バックエンド。将来 Python サイドカー等へ差し替えられるよう、
-  // separate(buffer, opts, handle) を実装したオブジェクトを登録する形にしてある。
-  // 抽象はこの1点だけ（過剰設計はしない）。
+  // 分離バックエンド。separate(buffer, opts, handle) を実装したオブジェクトを
+  // 登録する形にしてある。抽象はこの1点だけ（過剰設計はしない）。
+  //   onnx   … ブラウザ内処理（既定のフォールバック）
+  //   python … ローカルの Python サイドカー（tools/stems-sidecar/。数倍速い）
   backend: 'onnx',
   backends: {},
 
   // クリップ（AudioBuffer の一部）を4ステムに分離する。
   // opts: { offset, duration            … buffer 内の分離対象範囲（秒）
   //         onProgress(p)               … p = {phase:'load'|'separate', done, total}
+  //                                       （python は {phase:'separate', unit:'percent', done:0..100, total:100}）
+  //         onBackend(name)             … 使用バックエンド確定時に 'python'|'onnx' で呼ぶ（UI 表示用）
+  //         backend                     … バックエンドの明示指定（自動検出を飛ばす）
   //         workers                     … Worker 数の明示指定（既定は autoWorkers()）
   //         infer(left, right, seg)     … テスト用: 推論だけ差し替える（Worker を使わない） }
   // 戻り値: { drums, bass, other, vocals } … 各 44.1kHz/2ch の AudioBuffer
@@ -47,11 +51,18 @@ DAW.stems = {
   async separate(buffer, opts) {
     if (this.running) throw this.error('busy', 'ステム分離は既に実行中です');
     opts = opts || {};
-    const backend = this.backends[opts.backend || this.backend];
-    if (!backend) throw this.error('backend', '分離バックエンドがありません: ' + (opts.backend || this.backend));
-    const handle = { cancelled: false, cancel: null };
+    // バックエンド確定前（サイドカー検出中）のキャンセルはフラグだけ立てて直後に拾う
+    const handle = { cancelled: false, cancel: () => { handle.cancelled = true; } };
     this.running = handle;
     try {
+      // 明示指定・テスト経路（infer）以外は Python サイドカーを検出して優先する。
+      // 検出は /ping 1発（タイムアウト1.5秒）。居なければ従来のブラウザ内処理へ。
+      let name = opts.backend || (opts.infer ? 'onnx' : null);
+      if (!name) name = (await this.backends.python.detect()) ? 'python' : this.backend;
+      const backend = this.backends[name];
+      if (!backend) throw this.error('backend', '分離バックエンドがありません: ' + name);
+      if (handle.cancelled) throw this.error('cancelled', 'キャンセルされました');
+      if (opts.onBackend) opts.onBackend(name);
       return await backend.separate(buffer, opts, handle);
     } finally {
       this.running = null;
@@ -662,6 +673,181 @@ DAW.stems.backends.onnx = {
 
     // 3) 窓合成（線形クロスフェード + 重み正規化）→ 4 AudioBuffer
     return S.mergeSegments(results, starts, stride, total);
+  },
+};
+
+// ---- python バックエンド（ローカルサイドカー） -----------------------------
+// tools/stems-sidecar/ の demucs サーバ（http://127.0.0.1:8787）へ委譲する。
+// CPU ネイティブ推論なのでブラウザ内処理の数倍速い（30秒 WAV ≈14秒）。
+// 起動していれば separate() の自動検出（/ping）で優先的に選ばれる。
+// プロトコルの詳細（DAWS フレーミング等）は tools/stems-sidecar/README.md。
+DAW.stems.backends.python = {
+  URL: 'http://127.0.0.1:8787',
+  PING_TIMEOUT: 1500,          // 検出タイムアウト（ms）。ローカルなので短くてよい
+  POLL_INTERVAL: 1000,         // /progress のポーリング間隔（ms）
+
+  // fetch はテストでモックできるよう1点に集約する（window.fetch 全体は差し替えない）
+  _fetch: (url, init) => fetch(url, init),
+
+  // サイドカーが居るか /ping で確かめる。落ちている・応答しない・不正応答は全て false
+  //（呼び出し側がブラウザ内処理へフォールバックする）。
+  async detect() {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.PING_TIMEOUT);
+    try {
+      const res = await this._fetch(this.URL + '/ping', { signal: ctrl.signal });
+      if (!res.ok) return false;
+      const j = await res.json();
+      return !!(j && j.ok);
+    } catch (e) {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  // /progress を1秒ごとにポーリングして進捗を流す。戻り値は停止関数。
+  // 応答は {running, progress:0..1, stage} なので percent 表示用の形へ変換する。
+  pollProgress(handle, progress) {
+    let stopped = false, timer = 0;
+    const tick = async () => {
+      try {
+        const res = await this._fetch(this.URL + '/progress');
+        const j = await res.json();
+        if (!stopped && j && j.running) {
+          progress({ phase: 'separate', unit: 'percent',
+                     done: Math.max(0, Math.min(100, Math.round((j.progress || 0) * 100))), total: 100 });
+        }
+      } catch (e) { /* 一時的な失敗は無視（本体の fetch 側でエラーになる） */ }
+      if (!stopped) timer = setTimeout(tick, this.POLL_INTERVAL);
+    };
+    timer = setTimeout(tick, this.POLL_INTERVAL);
+    return () => { stopped = true; clearTimeout(timer); };
+  },
+
+  async separate(buffer, opts, handle) {
+    const S = DAW.stems;
+    const ctrl = new AbortController();
+    // キャンセルは fetch の abort（即座に戻る）と POST /cancel（サーバ側の demucs を
+    // kill する）の併用。abort だけだとサーバが最後まで無駄に回り続ける。
+    handle.cancel = () => {
+      if (handle.cancelled) return;
+      handle.cancelled = true;
+      ctrl.abort();
+      this._fetch(this.URL + '/cancel', { method: 'POST' }).catch(() => {});
+    };
+    const progress = p => { if (opts.onProgress && !handle.cancelled) opts.onProgress(p); };
+    const cancelledErr = () => S.error('cancelled', 'キャンセルされました');
+
+    // 1) 44.1kHz/2ch へ変換して 16bit WAV にエンコード（既存エンコーダを再利用）
+    const { left, right } = await S.toStereo44k(buffer, opts.offset, opts.duration);
+    if (handle.cancelled) throw cancelledErr();
+    const wav = DAW.wav.encodeWav16({
+      numberOfChannels: 2, sampleRate: S.SAMPLE_RATE, length: left.length,
+      getChannelData: c => (c ? right : left),
+    });
+    progress({ phase: 'separate', unit: 'percent', done: 0, total: 100 });
+
+    // 2) /separate へ POST。待っている間は /progress ポーリングで進捗を流す
+    const stopPoll = this.pollProgress(handle, progress);
+    let res;
+    try {
+      res = await this._fetch(this.URL + '/separate', {
+        method: 'POST', body: wav, signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/octet-stream' },
+      });
+    } catch (e) {
+      if (handle.cancelled) throw cancelledErr();
+      throw S.error('network',
+        'サイドカーと通信できません（サーバ停止の可能性）: ' + ((e && e.message) || e));
+    } finally {
+      stopPoll();
+    }
+    if (handle.cancelled || res.status === 499) throw cancelledErr();
+    if (res.status === 409) throw S.error('busy', 'サイドカーが別の分離を実行中です。完了を待ってから再試行してください');
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json()).error || ''; } catch (e) { /* 本文が JSON でない場合 */ }
+      throw S.error('sidecar', `サイドカーがエラーを返しました（HTTP ${res.status}）` + (detail ? ': ' + detail : ''));
+    }
+    const body = await res.arrayBuffer();
+    if (handle.cancelled) throw cancelledErr();
+    progress({ phase: 'separate', unit: 'percent', done: 100, total: 100 });
+
+    // 3) DAWS フレーミングをパースして4ステムを取り出す
+    const parsed = this.parseFrame(body);
+    const stems = {};
+    for (const name of S.TRACKS) {
+      if (!parsed[name]) throw S.error('sidecar', 'サイドカーの応答にステムがありません: ' + name);
+      stems[name] = parsed[name];
+    }
+    return stems;
+  },
+
+  // "DAWS" フレーミング（magic 4B + uint32LE ヘッダ長 + JSON + WAV 連結）をパースして
+  // { name: AudioBuffer } を返す。WAV は自前デコード（decodeAudioData は ctx の
+  // サンプルレートへ勝手にリサンプルするので使わない）。
+  parseFrame(ab) {
+    const S = DAW.stems;
+    const dv = new DataView(ab);
+    const bad = msg => S.error('sidecar', 'サイドカーの応答形式が不正です' + (msg ? `（${msg}）` : ''));
+    if (ab.byteLength < 8 || dv.getUint32(0, false) !== 0x44415753) throw bad('magic');   // "DAWS"
+    const n = dv.getUint32(4, true);
+    if (8 + n > ab.byteLength) throw bad('ヘッダ長');
+    let hdr;
+    try { hdr = JSON.parse(new TextDecoder().decode(new Uint8Array(ab, 8, n))); }
+    catch (e) { throw bad('JSON'); }
+    if (!hdr || !Array.isArray(hdr.stems)) throw bad('stems');
+    const base = 8 + n;
+    const out = {};
+    for (const s of hdr.stems) {
+      if (base + s.offset + s.length > ab.byteLength) throw bad(s.name + ' の範囲');
+      out[s.name] = this.decodeWav(new DataView(ab, base + s.offset, s.length));
+    }
+    return out;
+  },
+
+  // WAV（RIFF）→ AudioBuffer。16bit PCM（format 1）と float32（format 3）に対応。
+  // チャンクを順に歩くので、fmt/data 以外のチャンク（LIST 等）が挟まっても壊れない。
+  decodeWav(dv) {
+    const S = DAW.stems;
+    const bad = msg => S.error('sidecar', 'ステム WAV をデコードできません（' + msg + '）');
+    const tag = o => String.fromCharCode(dv.getUint8(o), dv.getUint8(o + 1), dv.getUint8(o + 2), dv.getUint8(o + 3));
+    if (dv.byteLength < 44 || tag(0) !== 'RIFF' || tag(8) !== 'WAVE') throw bad('RIFF ではない');
+    let pos = 12, fmt = null, dataOff = -1, dataLen = 0;
+    while (pos + 8 <= dv.byteLength) {
+      const id = tag(pos), size = dv.getUint32(pos + 4, true);
+      if (id === 'fmt ') {
+        fmt = {
+          format: dv.getUint16(pos + 8, true),
+          channels: dv.getUint16(pos + 10, true),
+          sampleRate: dv.getUint32(pos + 12, true),
+          bits: dv.getUint16(pos + 22, true),
+        };
+      } else if (id === 'data') {
+        dataOff = pos + 8;
+        dataLen = Math.min(size, dv.byteLength - dataOff);
+      }
+      pos += 8 + size + (size & 1);   // チャンクは2バイト境界に揃う
+    }
+    if (!fmt || dataOff < 0) throw bad('fmt/data チャンクがない');
+    const isFloat = fmt.format === 3 && fmt.bits === 32;
+    const isPcm16 = fmt.format === 1 && fmt.bits === 16;
+    if (!isFloat && !isPcm16) throw bad(`未対応フォーマット format=${fmt.format} bits=${fmt.bits}`);
+    if (fmt.channels < 1) throw bad('チャンネル数 0');
+    const bytesPer = fmt.bits / 8;
+    const frames = Math.floor(dataLen / (fmt.channels * bytesPer));
+    if (frames < 1) throw bad('データが空');
+    const buf = new AudioBuffer({ numberOfChannels: fmt.channels, length: frames, sampleRate: fmt.sampleRate });
+    for (let c = 0; c < fmt.channels; c++) {
+      const d = buf.getChannelData(c);
+      if (isFloat) {
+        for (let i = 0; i < frames; i++) d[i] = dv.getFloat32(dataOff + (i * fmt.channels + c) * 4, true);
+      } else {
+        for (let i = 0; i < frames; i++) d[i] = dv.getInt16(dataOff + (i * fmt.channels + c) * 2, true) / 32768;
+      }
+    }
+    return buf;
   },
 };
 

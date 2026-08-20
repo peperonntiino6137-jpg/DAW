@@ -714,3 +714,45 @@ fetch/XHR はローカルファイルに使えないが、`<script src>` は fil
 model-missing 誘導 / .onnx ドロップ。実モデルは重いので既定スイートでは走らせず、
 **`--bench` 時のみスモーク 1 本**（2 秒素材 → 実推論 16s、4 ステムとも有限・非無音を確認済み）。
 978/978 passed（--bench 時 1007/1007）。
+
+## ステム分離の Python サイドカー高速化（`tools/stems-sidecar/` / `js/stems.js`・2026-08-20）
+
+ステム分離をローカルの Python サイドカー（demucs 4.1.0 / htdemucs / CPU）へ委譲できるようにした。
+実測: 30 秒 WAV → 約 14 秒、3〜4 分曲 ≈1.5〜2.5 分（ブラウザ内処理の数分の一）。ピークメモリ約 1.2GB。
+
+### 構成
+
+- `tools/stems-sidecar/sidecar.py` — stdlib のみの HTTP サーバ（http://127.0.0.1:8787、CORS `*`、
+  127.0.0.1 バインド）。demucs は subprocess 呼び出しで、tqdm の stderr から進捗をパースする。
+  API: `GET /ping` / `GET /progress` / `POST /separate`（409=実行中、499=キャンセル）/ `POST /cancel`。
+  レスポンスは "DAWS" フレーミング（magic 4B + uint32LE ヘッダ長 + JSON + int16 WAV 連結、
+  ステム順 drums/bass/other/vocals）。レスポンスサイズは入力の約 4 倍。
+- `js/stems.js` の `DAW.stems.backends.python` — 既存のバックエンド差し替え口
+  （`separate(buffer, opts, handle)`）に登録。分離開始時に `/ping`（タイムアウト 1.5 秒）で検出し、
+  居れば python を既定で使用（ダイアログに「Python 高速処理」）、居なければ従来の onnx
+  （「ブラウザ内処理」）へフォールバック。WAV 化は `DAW.wav.encodeWav16` を再利用
+  （`getChannelData` 互換オブジェクトを渡すだけでよい）。進捗は `/progress` を 1 秒ポーリングして
+  `{phase:'separate', unit:'percent', done:0..100}` に変換。キャンセルは fetch abort +
+  `POST /cancel` の併用（abort だけだとサーバ側 demucs が回り続ける）。ステム WAV のデコードは
+  自前パーサ（`decodeAudioData` は ctx のレートへ勝手にリサンプルするので使わない。int16/float32 対応）。
+  分離結果の後段（4 トラック配置・undo 1 回）は既存経路をそのまま使う。
+
+### MAX_PATH の罠（重要・再利用可）
+
+torch を含む venv は内部パスが非常に深く、長いディレクトリ配下に作ると Windows の
+MAX_PATH（260 文字）を超えて**作成も import も失敗する**。検証時はジャンクションで
+短縮したが、統合版では最初から短い実パス `%LOCALAPPDATA%\daw-stems-venv` に venv を
+作る方式にした（ジャンクションの作成・張り替えが不要で単純）。また demucs 4.1.0 は
+numpy を依存宣言していないため `pip install demucs numpy` と**両方明示**が必要。
+モデル htdemucs（80MB）は初回分離時に HuggingFace から自動 DL される
+（`%USERPROFILE%\.cache\huggingface\hub`）。`start-sidecar.bat` が venv 作成〜起動まで自己完結。
+
+### 検証
+
+`test/tests-stems.js` にグループ「[38] Python サイドカー」を追加（P.1〜P.20）。実サーバは
+既定スイートでは起動せず、fetch を `DAW.stems.backends.python._fetch` の 1 点に集約して
+モックする（window.fetch を差し替えるとハーネスの結果送信が壊れる）。検出成功→python 選択 /
+検出失敗→ブラウザ内フォールバック / DAWS フレーミングの往復パース / abort+`/cancel` 併用の
+キャンセル / 499・500・409・ネットワーク断のエラー表示 / UI 完了経路（4 トラック配置・undo 1 回）
+をカバー。S.33 は実サーバが居ても壊れないよう `backend:'onnx'` を明示するようにした。
+DAW.exe（build-exe.ps1）へは同梱しない（開発者向けオプション）。

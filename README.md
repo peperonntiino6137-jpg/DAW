@@ -70,6 +70,15 @@ Windows 標準の csc.exe（.NET Framework）だけでビルドできる。ツ�
 - 完了すると元トラックの直下に「(クリップ名) Drums / Bass / Other / Vocals」の4トラックができる。元クリップはそのまま。「元に戻す」1回で4トラックまとめて消える
 - モデル（`models/htdemucs/`、約 240MB）は分離を実行した時だけ読み込まれる。モデルが未配置の環境では、[htdemucs_embedded.onnx](https://huggingface.co/timcsy/demucs-web-onnx) をタイムラインへドロップすれば使える
 
+### Python サイドカーによる高速化（開発者向けオプション）
+
+ローカルでネイティブ demucs を動かすサイドカーを起動しておくと、ステム分離が自動でそちらへ委譲されて数倍速くなる（進捗ダイアログに「Python 高速処理」/ 通常時は「ブラウザ内処理」と表示される）。
+
+- セットアップは `tools\stems-sidecar\start-sidecar.bat` を実行するだけ。初回は venv 作成 + `pip install demucs numpy` で約 700MB、さらに初回分離時に htdemucs モデル約 80MB を自動ダウンロードする（demucs 4.1.0 は numpy を依存宣言していないため両方入れる）
+- 速度目安: 30 秒 WAV → 約 14 秒、3〜4 分曲 → 約 1.5〜2.5 分（CPU。ブラウザ内処理の数分の一）
+- サーバは `http://127.0.0.1:8787`（127.0.0.1 バインドのみ）。止めれば自動でブラウザ内処理に戻る
+- DAW.exe には同梱されない。詳細・API・MAX_PATH の注意は `tools/stems-sidecar/README.md`
+
 ### クレジットとライセンス
 
 ステム分離は以下の成果物を利用している（いずれも MIT ライセンス）:

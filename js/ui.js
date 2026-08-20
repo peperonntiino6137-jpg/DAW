@@ -848,6 +848,15 @@ DAW.ui = {
     return { overlay, msg, fill, count, btn, title };
   },
 
+  // バックエンド確定時の表示（Python サイドカーが居れば高速処理の旨を出す）
+  setStemsBackend(dlg, backend) {
+    if (!dlg) return;
+    dlg.backendLabel = backend === 'python' ? 'Python 高速処理' : 'ブラウザ内処理';
+    if (document.getElementById('stems-modal')) {
+      dlg.msg.textContent = `${dlg.title}: 分離中…（${dlg.backendLabel}）`;
+    }
+  },
+
   updateStemsDialog(dlg, p) {
     if (!dlg || !document.getElementById('stems-modal')) return;
     if (p.phase === 'load') {
@@ -856,9 +865,10 @@ DAW.ui = {
       dlg.count.textContent = `${p.done} / ${p.total} ファイル`;
     } else {
       const pct = p.total > 0 ? Math.round(p.done / p.total * 100) : 0;
-      dlg.msg.textContent = `${dlg.title}: 分離中…`;
+      dlg.msg.textContent = `${dlg.title}: 分離中…` + (dlg.backendLabel ? `（${dlg.backendLabel}）` : '');
       dlg.fill.style.width = pct + '%';
-      dlg.count.textContent = `セグメント ${p.done} / ${p.total}（${pct}%）`;
+      // python サイドカーはセグメント数を持たない（% のみ）ので表記を分ける
+      dlg.count.textContent = p.unit === 'percent' ? `${pct}%` : `セグメント ${p.done} / ${p.total}（${pct}%）`;
     }
   },
 
@@ -893,6 +903,7 @@ DAW.ui = {
       const stems = await DAW.stems.separate(buffer, {
         offset: clip.offset,
         duration: clip.duration,
+        onBackend: b => this.setStemsBackend(dlg, b),
         onProgress: p => this.updateStemsDialog(dlg, p),
       });
       const cur = DAW.findClip(clipId);   // 分離中の移動・削除に追従（消えていたら控えの値）
