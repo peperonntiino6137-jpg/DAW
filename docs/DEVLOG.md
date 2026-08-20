@@ -898,3 +898,55 @@ BPM を読む（レンダリング中に BPM は変わらない）。
 （クリック検出）/ テープ風の実効遅延を「直線ランプ入力 x(t)=t → d(t)=t−y(t)」で逐次測定して
 滑らかさを確認 / ピンポンの L→R→L 交互 / 決定性（2回レンダリング完全一致）/ exportMix 経路。
 レンダリング途中のタイム変更は `OfflineAudioContext.suspend()` で再現する（再利用可の知見）。
+
+## マルチバンドコンプレッサー / グッダイザー（`js/plugins/multiband.js` / `js/plugins/goodizer.js`・2026-08-20）
+
+FL Studio の Maximus 風 3バンドコンプレッサーと、その 1 ノブ版（Soundgoodizer 風）を
+内蔵プラグインとして追加。どちらもネイティブノードのみで構成しているので
+`AudioContext` / `OfflineAudioContext` の両方でそのまま動く（prepare 不要・書き出し一致）。
+
+### クロスオーバー方式（Linkwitz-Riley 4次 + 位相合わせオールパス）
+
+BiquadFilter の lowpass / highpass（Butterworth Q）を 2 段カスケードすると LR4
+（24dB/oct）になる。LR4 の LP+HP の和は「2次オールパス」（振幅 1・位相のみ回転）に
+なることを利用し、3 バンドを次のツリーにすると再合算が振幅フラットに戻る:
+
+- 低 = LP4(f1) → **AP2(f2)**（位相合わせ用の 2 次オールパス）
+- 中 = HP4(f1) → LP4(f2)
+- 高 = HP4(f1) → HP4(f2)
+- 和 = AP2(f1)·AP2(f2) …… 振幅 1
+
+数学的根拠: LR4 では LP(s)+HP(s) = (s²−√2s+1)/(s²+√2s+1)（Q=1/√2 の 2 次 AP）。
+テスト M.7 で 60Hz〜6kHz（交差周波数ちょうどを含む）の再合算比が全点 1.000 になることを確認。
+
+**Web Audio の罠（重要・再利用可）**: BiquadFilter の Q は lowpass/highpass だけ
+「dB」解釈、allpass などは線形。Butterworth にするには LP/HP へ
+`20*log10(1/√2) ≈ -3.0103`、AP へ `0.7071` を渡す必要がある。ここを間違えると
+再合算にリップルが出る（フラットさのテストで検出できる）。
+
+### 帯域コンプと 1 ノブ化
+
+各バンドは 分割フィルタ → DynamicsCompressorNode（threshold/ratio/attack/release、knee 6 固定）
+→ バンドゲイン(dB)、合算後にマスターゲイン(dB)。パラメータは 17 個
+（交差 2 + 5×3 バンド + マスター）。
+
+`goodizer.js` は multiband の `create()` をそのまま呼び出す「パッケージング」プラグイン。
+amount(0..1) から 3 バンドの thr（-30a/-22a/-26a dB）・ratio（1+3a/1+2a/1+2.5a）を導出し、
+下げた分を自動メイクアップ `-thr·(1-1/ratio)·0.4` で持ち上げ、低・高域に +1.5a/+1.0a dB の
+チルト（スマイルカーブ）を足す。amount 0 は thr 0 / ratio 1 / gain 0 になり、
+振幅フラットな帯域分割を通るだけのほぼ素通し（M.16 で倍率 1.000 を確認）。
+
+### DynamicsCompressorNode の決定性（重要・再利用可）
+
+Chrome の DynamicsCompressorNode は同一入力・同一設定でもレンダリングごとに
+float 1ULP 程度（実測 max ~2.4e-7 ≈ -132dBFS、出現もランダム）のビット差が出ることがある
+（ヒープ配置による SIMD/スカラ経路の揺れとみられる。BiquadFilter や ConvolverNode では
+観測されない）。挙動としては同一なので、決定性テストはビット一致ではなく
+「2回レンダリングの最大差 < 1e-5（-100dBFS）」で判定する（M.14 / M.18）。
+
+### 検証
+
+`test/tests-multiband.js` にグループ「[40] マルチバンド/グッダイザー」を追加（M.1〜M.22、22 件）。
+帯域分割（バンドソロで正弦波の行き先を確認）/ 交差周波数変更の反映 / 再合算フラット /
+圧縮・レシオ・ダイナミックレンジ縮小 / 帯域独立性 / バンド・マスターゲイン / 決定性 /
+goodizer の素通し・音圧・決定性 / トラック載せ書き出し / ライブ変更 をカバー。全 1022 件パス。
