@@ -2,32 +2,82 @@
 
 // WAVエンコード、ミックス書き出し、プロジェクト保存/読み込み
 DAW.wav = {
-  // AudioBuffer -> 16bit PCM WAV の ArrayBuffer
-  encodeWav16(buffer) {
+  // ビット深度ごとの諸元。isFloat の 32bit float は IEEE float（format tag 3）で、
+  // ±1.0 を超えるサンプルもそのまま保存できる（整数深度はクランプされる）。
+  DEPTHS: {
+    16:    { bytes: 2, isFloat: false },
+    24:    { bytes: 3, isFloat: false },
+    '32f': { bytes: 4, isFloat: true },
+  },
+
+  // AudioBuffer（互換の形でも可） -> WAV の ArrayBuffer。
+  // opts.bitDepth: 16 | 24 | '32f'（既定 16）。
+  // 32f は非 PCM なので fmt チャンクに cbSize（=0）を持たせ、fact チャンクも書く（仕様どおり）。
+  encodeWav(buffer, opts) {
+    const bitDepth = (opts && opts.bitDepth) != null ? opts.bitDepth : 16;
+    const spec = this.DEPTHS[bitDepth];
+    if (!spec) throw new Error('未対応のビット深度: ' + bitDepth);
     const numCh = buffer.numberOfChannels;
     const sr = buffer.sampleRate;
     const len = buffer.length;
-    const blockAlign = numCh * 2;
+    const blockAlign = numCh * spec.bytes;
     const dataSize = len * blockAlign;
-    const ab = new ArrayBuffer(44 + dataSize);
+    const fmtSize = spec.isFloat ? 18 : 16;         // float は cbSize（uint16 = 0）付き
+    const factSize = spec.isFloat ? 12 : 0;         // 'fact' + size + dwSampleLength
+    const headerSize = 12 + 8 + fmtSize + factSize + 8;
+    const ab = new ArrayBuffer(headerSize + dataSize);
     const dv = new DataView(ab);
     const ws = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
-    ws(0, 'RIFF'); dv.setUint32(4, 36 + dataSize, true); ws(8, 'WAVE');
-    ws(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true);
+    ws(0, 'RIFF'); dv.setUint32(4, headerSize - 8 + dataSize, true); ws(8, 'WAVE');
+    ws(12, 'fmt '); dv.setUint32(16, fmtSize, true);
+    dv.setUint16(20, spec.isFloat ? 3 : 1, true);   // format tag: 1=PCM / 3=IEEE float
     dv.setUint16(22, numCh, true); dv.setUint32(24, sr, true);
-    dv.setUint32(28, sr * blockAlign, true); dv.setUint16(32, blockAlign, true); dv.setUint16(34, 16, true);
-    ws(36, 'data'); dv.setUint32(40, dataSize, true);
+    dv.setUint32(28, sr * blockAlign, true); dv.setUint16(32, blockAlign, true);
+    dv.setUint16(34, spec.bytes * 8, true);
+    let o = 20 + fmtSize;
+    if (spec.isFloat) {
+      dv.setUint16(38, 0, true);                    // cbSize = 0（拡張なし）
+      ws(o, 'fact'); dv.setUint32(o + 4, 4, true); dv.setUint32(o + 8, len, true);
+      o += 12;
+    }
+    ws(o, 'data'); dv.setUint32(o + 4, dataSize, true);
+    this.writeSamples(dv, o + 8, buffer, bitDepth);
+    return ab;
+  },
+
+  // インターリーブしたサンプル列を dv の offset 以降へ書く（ADM 書き出しの data チャンクと共用）。
+  // 整数深度は ±1.0 でクランプ（従来の encodeWav16 と同じ丸め = ゼロ方向切り捨て）、float は素通し。
+  writeSamples(dv, offset, buffer, bitDepth) {
+    const spec = this.DEPTHS[bitDepth];
+    const numCh = buffer.numberOfChannels;
+    const len = buffer.length;
     const chans = [];
     for (let c = 0; c < numCh; c++) chans.push(buffer.getChannelData(c));
-    let o = 44;
+    let o = offset;
     for (let i = 0; i < len; i++) {
       for (let c = 0; c < numCh; c++) {
-        const s = Math.max(-1, Math.min(1, chans[c][i]));
-        dv.setInt16(o, s < 0 ? s * 32768 : s * 32767, true);
-        o += 2;
+        if (spec.isFloat) {
+          dv.setFloat32(o, chans[c][i], true);
+        } else {
+          const s = Math.max(-1, Math.min(1, chans[c][i]));
+          if (bitDepth === 16) {
+            dv.setInt16(o, s < 0 ? s * 32768 : s * 32767, true);
+          } else {   // 24bit: 3バイト LE を手書きする（DataView に setInt24 は無い）
+            const n = (s < 0 ? s * 8388608 : s * 8388607) | 0;
+            dv.setUint8(o, n & 0xff);
+            dv.setUint8(o + 1, (n >> 8) & 0xff);
+            dv.setUint8(o + 2, (n >> 16) & 0xff);
+          }
+        }
+        o += spec.bytes;
       }
     }
-    return ab;
+    return o;
+  },
+
+  // AudioBuffer -> 16bit PCM WAV の ArrayBuffer（従来 API。encodeWav の別名）
+  encodeWav16(buffer) {
+    return this.encodeWav(buffer, { bitDepth: 16 });
   },
 
   // AudioBuffer の絶対値ピーク（1.0 超 = 16bit WAV 化でクリップする）
@@ -88,6 +138,10 @@ DAW.wav = {
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   },
 
+  // 書き出しオプション（UI の選択が反映される）。
+  // sampleRate は 0 でライブと同一（既定 = 従来どおり）、それ以外は指定レートでレンダリングする。
+  exportOptions: { bitDepth: 16, sampleRate: 0 },
+
   // OfflineAudioContext で全トラックをレンダリングして WAV ダウンロード。
   // ループ区間が有効なら、その区間だけを書き出す（ボタンの表示もそれに合わせて変わる）。
   async exportMix() {
@@ -100,7 +154,8 @@ DAW.wav = {
       return;
     }
     DAW.audio.ensureCtx();
-    const sr = DAW.audio.ctx.sampleRate; // ライブと同一レートでレンダリング
+    const opt = this.exportOptions;
+    const sr = opt.sampleRate || DAW.audio.ctx.sampleRate; // 既定はライブと同一レート
     // リミッターの先読みぶん出力が遅れるので、その分だけ長くレンダリングして後で頭を捨てる
     const latency = DAW.limiter.enabled ? DAW.limiter.latencySec() : 0;
     const skip = Math.round(latency * sr);
@@ -139,9 +194,10 @@ DAW.wav = {
     const rendered = DAW.limiter.enabled
       ? this.trimHead(DAW.limiter.processBuffer(raw), skip)
       : raw;
-    // 16bit WAV は ±1.0 で頭打ちになる。リミッターが有効ならシーリングで抑えられるので、
-    // 警告を出すのはリミッターを切っているときだけ。
-    if (!DAW.limiter.enabled && peak > 1.0) {
+    // 整数深度（16/24bit）の WAV は ±1.0 で頭打ちになる。リミッターが有効なら
+    // シーリングで抑えられるので、警告を出すのはリミッターを切っているときだけ。
+    // 32bit float は ±1.0 超もそのまま保存できるため警告しない。
+    if (!DAW.limiter.enabled && peak > 1.0 && opt.bitDepth !== '32f') {
       const down = (1 / peak).toFixed(2);
       const proceed = confirm(
         `ミックスが 0dBFS を超えています（ピーク +${this.toDbfs(peak).toFixed(1)} dBFS）。\n` +
@@ -149,7 +205,8 @@ DAW.wav = {
         `OK: このまま書き出す / キャンセル: 中止`);
       if (!proceed) return;
     }
-    this.download(new Blob([this.encodeWav16(rendered)], { type: 'audio/wav' }), loop ? 'loop.wav' : 'mix.wav');
+    this.download(new Blob([this.encodeWav(rendered, { bitDepth: opt.bitDepth })], { type: 'audio/wav' }),
+      loop ? 'loop.wav' : 'mix.wav');
   },
 
   // プロジェクトを JSON（音声は WAV -> base64 埋め込み）で保存。

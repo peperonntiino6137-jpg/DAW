@@ -135,6 +135,17 @@ input[type="range"] { accent-color: var(--accent); }
 #btn-metro.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 #btn-snap.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 
+/* 書き出しボタン脇の小さな選択（ビット深度 / サンプルレート） */
+.export-group { display: flex; align-items: center; gap: 4px; }
+.export-group select {
+  background: var(--panel2);
+  color: var(--dim);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 10px;
+  padding: 3px 2px;
+}
+
 .zoom-group { display: flex; align-items: center; gap: 4px; }
 .zoom-group button { padding: 4px 8px; font-size: 12px; }
 #zoom-label {
@@ -784,6 +795,12 @@ input[type="range"] { accent-color: var(--accent); }
 #obj-lim-byp { padding: 1px 8px; font-size: 10px; color: var(--dim); }
 #obj-lim-byp.on { background: #b3452e; border-color: #b3452e; color: #fff; }
 #obj-lim-note { font-size: 10px; color: #5f5f6b; }
+
+/* オブジェクト書き出し（RENDERER）。ADM / オブジェクト別 WAV */
+#obj-export-btns { display: flex; flex-direction: column; gap: 6px; }
+#obj-export-btns button { padding: 4px 10px; font-size: 11px; color: var(--text); }
+#obj-export-btns button:disabled { color: var(--dim); opacity: 0.6; }
+#obj-export-note { font-size: 10px; color: #5f5f6b; max-width: 150px; line-height: 1.5; }
 
 /* ルームリバーブ（RENDERER）。ノブの見た目はリミッターと同じ */
 #obj-rev-knobs { display: flex; gap: 14px; flex-wrap: wrap; }

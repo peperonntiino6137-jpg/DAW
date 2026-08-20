@@ -54,7 +54,20 @@
     <div class="spacer"></div>
     <button id="btn-add-track">＋ トラック</button>
     <button id="btn-import">音声を読み込み</button>
-    <button id="btn-export">WAV書き出し</button>
+    <div class="export-group">
+      <select id="export-depth" title="書き出しのビット深度（32bit float は 0dBFS 超もそのまま保存できる）">
+        <option value="16" selected>16bit</option>
+        <option value="24">24bit</option>
+        <option value="32f">32f</option>
+      </select>
+      <select id="export-rate" title="書き出しのサンプルレート（既定は再生と同一）">
+        <option value="0" selected>SRそのまま</option>
+        <option value="44100">44.1k</option>
+        <option value="48000">48k</option>
+        <option value="96000">96k</option>
+      </select>
+      <button id="btn-export">WAV書き出し</button>
+    </div>
     <button id="btn-save">保存</button>
     <button id="btn-open">開く</button>
     <input type="file" id="file-input" accept="audio/*" multiple hidden>
@@ -173,6 +186,15 @@
         <div id="obj-knobs"></div>
         <div id="obj-lim-note">先読み型。シーリングを超えるサンプルは出力されない（ドラッグで値を変更 / ダブルクリックで既定値）</div>
       </div>
+      <!-- オブジェクトの書き出し（ADM / オブジェクト別 WAV）。実処理は js/adm.js -->
+      <div class="obj-rend-sec" id="obj-export-sec">
+        <div class="obj-sec-title">オブジェクト書き出し</div>
+        <div id="obj-export-btns">
+          <button id="obj-adm" title="ADM (ITU-R BS.2076) メタデータ付き BW64 を書き出す。各オブジェクトは1チャンネルの素の音声（定位・リバーブなし）">ADM (BW64)</button>
+          <button id="obj-wavs" title="割り当てトラックのあるオブジェクトを1本ずつモノラル WAV でダウンロードする">オブジェクト別 WAV</button>
+        </div>
+        <div id="obj-export-note">位置・経路・距離はメタデータとして保存され、対応レンダラーが再生時に定位する</div>
+      </div>
     </div>
     </div>
   </section>
@@ -190,6 +212,7 @@
   <script src="js/limiter.js"></script>
   <script src="js/audio.js"></script>
   <script src="js/objaudio.js"></script>
+  <script src="js/adm.js"></script>
   <script src="js/stems.js"></script>
   <script src="js/knob.js"></script>
   <script src="js/ui.js"></script>

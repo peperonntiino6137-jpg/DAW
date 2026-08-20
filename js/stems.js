@@ -742,10 +742,11 @@ DAW.stems.backends.python = {
     // 1) 44.1kHz/2ch へ変換して 16bit WAV にエンコード（既存エンコーダを再利用）
     const { left, right } = await S.toStereo44k(buffer, opts.offset, opts.duration);
     if (handle.cancelled) throw cancelledErr();
-    const wav = DAW.wav.encodeWav16({
+    // サイドカーの入力は 16bit 固定（書き出しオプションのビット深度とは無関係）
+    const wav = DAW.wav.encodeWav({
       numberOfChannels: 2, sampleRate: S.SAMPLE_RATE, length: left.length,
       getChannelData: c => (c ? right : left),
-    });
+    }, { bitDepth: 16 });
     progress({ phase: 'separate', unit: 'percent', done: 0, total: 100 });
 
     // 2) /separate へ POST。待っている間は /progress ポーリングで進捗を流す

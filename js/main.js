@@ -48,6 +48,15 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // 書き出しオプション（ビット深度・サンプルレート）。値の正は DAW.wav.exportOptions
+  const applyExportOptions = () => {
+    const d = $('export-depth').value;
+    DAW.wav.exportOptions.bitDepth = d === '32f' ? '32f' : +d;
+    DAW.wav.exportOptions.sampleRate = +$('export-rate').value || 0;
+  };
+  $('export-depth').addEventListener('change', applyExportOptions);
+  $('export-rate').addEventListener('change', applyExportOptions);
+
   // 書き出し
   $('btn-export').addEventListener('click', async e => {
     const btn = e.target;
