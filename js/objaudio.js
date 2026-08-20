@@ -497,18 +497,36 @@ DAW.objaudio = {
   // サンプリング時刻の列（プロジェクト絶対時間・昇順・重複なし）。
   // 動いている区間（最初の点〜最後の点）だけ PATH_BAKE_DT 刻み + 各 waypoint 時刻。
   // 前後のホールド区間は値が変わらないので端の2イベントに省略される（刻みを入れない）。
-  bakeTimes(pts, from, until) {
+  // loop 有効時は最後の点以降も動き続けるので、until まで刻みを続け、waypoint 時刻も
+  // 周回ごとに展開する（折り返し境界 = 先頭点の時刻も各周回に入る。位置は pathPosAt が
+  // 剰余で返すため、焼き込んだランプはライブの追従とサンプル時刻ごとに一致する）。
+  bakeTimes(pts, from, until, loop) {
     const ts = [from, until];
-    const m0 = Math.max(from, pts[0].t);
-    const m1 = Math.min(until, pts[pts.length - 1].t);
+    const t0 = pts[0].t;
+    const span = pts[pts.length - 1].t - t0;
+    const looped = !!loop && span > 0;
+    const m0 = Math.max(from, t0);
+    const m1 = looped ? until : Math.min(until, pts[pts.length - 1].t);
     // 加算の誤差が積もらないよう k * DT で刻む（waypoint 時刻と紛らわしい端数を出さない）
     for (let k = 0; ; k++) {
       const t = m0 + k * this.PATH_BAKE_DT;
       if (t >= m1 - 1e-9) break;
       ts.push(t);
     }
-    for (const p of pts) {
-      if (p.t > from && p.t < until) ts.push(p.t);
+    if (looped) {
+      // from より前の周回は飛ばしてから、until まで各周回の waypoint 時刻を並べる
+      let base = t0;
+      if (from > base) base += Math.floor((from - base) / span) * span;
+      for (; base < until; base += span) {
+        for (const p of pts) {
+          const t = base + (p.t - t0);
+          if (t > from && t < until) ts.push(t);
+        }
+      }
+    } else {
+      for (const p of pts) {
+        if (p.t > from && p.t < until) ts.push(p.t);
+      }
     }
     ts.sort((a, b) => a - b);
     const out = [];
@@ -571,7 +589,7 @@ DAW.objaudio = {
       params.push(nodes.rev.gain);
       calc.push(pos => this.revSendLevel(obj, pos.dist));
     }
-    const times = this.bakeTimes(pts, from, until);
+    const times = this.bakeTimes(pts, from, until, obj.path.loop);
     for (let i = 0; i < times.length; i++) {
       const pos = DAW.objects.pathPosAt(obj, times[i]);
       const ct = Math.max(0, times[i] - from);

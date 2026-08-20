@@ -614,6 +614,26 @@ input[type="range"] { accent-color: var(--accent); }
 #obj-path-tools button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 #obj-path-tools button:disabled { opacity: 0.4; }
 
+/* 軌道ジェネレータのパラメータ枠（「生成」メニュー直下の使い捨て枠。ctx-menu と同格の重なり） */
+#obj-gen-box {
+  position: fixed;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  font-size: 11px;
+}
+#obj-gen-box .ogb-title { color: var(--dim); font-size: 10px; white-space: nowrap; }
+#obj-gen-box label { display: flex; align-items: center; gap: 4px; color: var(--dim); white-space: nowrap; }
+#obj-gen-box input { width: 52px; font-size: 11px; }
+#obj-gen-box .ogb-apply { padding: 2px 10px; background: var(--accent); border-color: var(--accent); color: #fff; }
+#obj-gen-box .ogb-close { padding: 2px 6px; color: var(--dim); }
+
 /* 正面ビュー（リスナーを背後から見た図）。横=左右、縦=高さ。距離はトップビューの担当。
    狭い画面では球ビューと同じくストリップ側を優先して縮む（min-width まで）。 */
 #obj-frontview {
