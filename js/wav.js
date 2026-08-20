@@ -173,6 +173,12 @@ DAW.wav = {
       objects: DAW.objects.toJSON(),
       // ルームリバーブのマスターパラメータ（RENDERER）。追加フィールドのみなので version:1 のまま互換
       roomReverb: Object.assign({}, DAW.objaudio.revParams),
+      // マスターリミッター / 出力形式（明示選択のみ）/ メトロノーム / グリッド。
+      // いずれも追加フィールドのみなので version:1 のまま互換（旧実装はこれらを無視して開ける）。
+      limiter: DAW.limiter.toJSON(),
+      output: DAW.objaudio.outputToJSON(),
+      metronome: Object.assign({}, DAW.metronome),
+      grid: Object.assign({}, DAW.grid),
       tracks: DAW.project.tracks,
       buffers,
     };
@@ -225,6 +231,14 @@ DAW.wav = {
     };
     DAW.objects.load(data.objects);   // 旧プロジェクトは objects を持たないので空になる
     DAW.objaudio.loadRevParams(data.roomReverb);   // 欠落は既定値（level=0 = 従来の音）で補完
+    DAW.limiter.load(data.limiter);           // 欠落は既定値（有効・0dB/100ms/-1dB/5ms）で補完
+    DAW.objaudio.loadOutput(data.output);     // 欠落はバイノーラル / 5.1（明示選択だけを復元）
+    const met = data.metronome || {};
+    DAW.metronome.enabled = !!met.enabled;
+    DAW.metronome.volume = met.volume != null && isFinite(+met.volume) ? +met.volume : 0.35;
+    const grid = data.grid || {};
+    DAW.grid.enabled = !!grid.enabled;
+    DAW.grid.division = +grid.division > 0 ? +grid.division : 1;
     const loop = data.loop || {};
     DAW.loop.enabled = !!loop.enabled;
     DAW.loop.start = +loop.start || 0;

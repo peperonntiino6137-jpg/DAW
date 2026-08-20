@@ -74,6 +74,12 @@ window.addEventListener('DOMContentLoaded', () => {
       DAW.ui.renderTracks();
       DAW.ui.updatePlayButton();
       DAW.ui.els.btnLoop.classList.toggle('on', DAW.loop.enabled);
+      // BPM / メトロノーム / グリッドもプロジェクト保存の対象。表示を state へ追従させる
+      DAW.ui.els.bpm.value = DAW.project.bpm;
+      DAW.ui.els.btnMetro.classList.toggle('on', DAW.metronome.enabled);
+      DAW.ui.els.btnSnap.classList.toggle('on', DAW.grid.enabled);
+      DAW.ui.els.gridDiv.value = String(DAW.grid.division);
+      DAW.ui.applyGrid();
       DAW.ui.updateExportLabel();
       DAW.history.reset();
     }

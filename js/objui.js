@@ -1807,6 +1807,7 @@ DAW.objui = {
     if (e.revKnobs) for (const spec of this.REV_KNOBS) e.revKnobs.appendChild(this.buildRevKnob(spec));
     e.limByp.addEventListener('click', () => {
       DAW.limiter.setEnabled(!DAW.limiter.enabled);
+      DAW.history.commit();   // enabled も履歴スナップショットに入る（クリック1回 = undo 1回）
       this.renderRenderer();
     });
   },
@@ -1822,9 +1823,9 @@ DAW.objui = {
       def: spec.def,
       get: () => DAW.limiter.params[spec.key],
       set: v => { DAW.limiter.set(spec.key, v); this.renderRenderer(); },
-      // リミッターの設定はプロジェクト状態（履歴のスナップショット）に入っていないので
-      // commit は何もしない。入るようになったらここで DAW.history.commit() を呼ぶ。
-      commit: () => {},
+      // リミッターの設定は履歴スナップショット/プロジェクト保存の対象。
+      // ドラッグ全体（pointerup）で commit 1回 = undo 1エントリ（クリップ移動と同じ粒度）。
+      commit: () => DAW.history.commit(),
       format: v => v.toFixed(spec.digits) + spec.unit,
       active: () => DAW.limiter.enabled,
     });
@@ -1845,9 +1846,8 @@ DAW.objui = {
       def: spec.def,
       get: () => DAW.objaudio.revParams[spec.key],
       set: v => { DAW.objaudio.setRevParam(spec.key, v); this.renderRenderer(); },
-      // リミッターと同じく履歴のスナップショット外（保存はプロジェクト保存 roomReverb が担う）。
-      // 履歴に入るようになったらここで DAW.history.commit() を呼ぶ。
-      commit: () => {},
+      // リミッターと同じく履歴スナップショット/プロジェクト保存の対象。ドラッグ全体で commit 1回。
+      commit: () => DAW.history.commit(),
       format: v => v.toFixed(spec.digits) + spec.unit,
       active: () => DAW.objaudio.revParams.level > 0,
     });

@@ -38,6 +38,7 @@ DAW.limiter = {
     ceilingDb: [-24, 0],
     lookaheadMs: [0, 20],
   },
+  DEFAULTS: { gainDb: 0, releaseMs: 100, ceilingDb: -1, lookaheadMs: 5 },
   modUrl: null,
   node: null,        // ライブ用の AudioWorkletNode
   _Core: null,
@@ -59,6 +60,23 @@ DAW.limiter = {
   setEnabled(on) {
     this.enabled = !!on;
     if (this.node) this.node.port.postMessage({ type: 'bypass', bypass: !this.enabled });
+  },
+
+  // 保存/履歴スナップショット用のプレーンな状態（params はコピーして固定する）
+  toJSON() {
+    return { enabled: this.enabled, params: Object.assign({}, this.params) };
+  },
+
+  // プロジェクト読み込み/履歴復元用。欠落や不正値は既定値で補完する
+  // （旧プロジェクトは従来どおり「有効・既定パラメータ」で開く）。
+  load(src) {
+    const s = src && typeof src === 'object' ? src : {};
+    const p = s.params && typeof s.params === 'object' ? s.params : {};
+    for (const key of Object.keys(this.LIMITS)) {
+      const v = +p[key];
+      this.set(key, p[key] != null && isFinite(v) ? v : this.DEFAULTS[key]);
+    }
+    this.setEnabled(s.enabled != null ? !!s.enabled : true);
   },
 
   // 出力の遅延（秒）。書き出しの整列と、再生ヘッド表示の補正に使う。

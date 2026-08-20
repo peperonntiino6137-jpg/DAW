@@ -1022,3 +1022,31 @@ Worklet には「タイムライン位置 tl = pos0 + (ctx時刻 − ctxTime0) �
 ### 検証（`test/tests-objreverb.js`・グループ [42]・64件）
 データモデル往復・undo・lock / 距離式 / センド0のバイナリ一致 / 残響尾 / 経路 dist 追従 /
 5.1 の 6ch 維持と分配 / RENDERER・ストリップのノブ。全 1202 件パス。
+
+## マスター設定のプロジェクト保存（`js/wav.js` / `js/limiter.js` / `js/objaudio.js` / `js/history.js`・2026-08-20）
+
+QA スイープで確定した「JSON 1ファイル完全復元」の穴を塞いだ。saveProject が
+マスターリミッター（`limiter: { enabled, params }`）・出力形式（`output: { mode, layout }`）・
+メトロノーム（`metronome`）・グリッド（`grid`）を保存する。いずれも追加フィールドのみで
+**version は 1 のまま**。欠落時は既定値フォールバック（`limiter.load` / `objaudio.loadOutput` が
+補完）なので旧プロジェクトは従来どおり開ける。roomReverb は実装済みだったことを確認。
+
+- **出力形式は「ユーザーの明示選択」だけを保存する**: `output.mode` は `binaural` / `speakers` の
+  2値（UI の OUT_MODES と同じ粒度）。equalpower / hrtf の別は autoHrtf の自動切替
+  （試聴中だけ HRTF）が決める**一時状態**なので保存しない。HRTF 試聴中に保存しても
+  `binaural` として残り、復元は等パワーから始めて自動切替に任せる。生の `mode` を保存すると
+  「保存した瞬間のモードが固定され、復元直後に wantedMode() と食い違う」ため
+- **履歴にも入れた**: リミッターとルームリバーブのマスターパラメータは保存対象になったので
+  履歴スナップショット（history.snapshot）へ追加し、RENDERER のノブの commit を no-op から
+  `DAW.history.commit()` に変更（ドラッグ全体 = pointerup で undo 1エントリ、以前の布石どおり）。
+  バイパスボタンも click 1回 = undo 1回。stateSig には limiter / revParams が既に混ざっていたので
+  undo 後のノブ追従はそのまま効く
+- **出力形式・メトロノーム・グリッドは履歴に入れない**（ループ・ズームと同じ「表示・再生側の
+  設定」の扱い。undo で出力チャンネル数が変わるのは驚きが大きい）
+- 読み込み後の UI 追従: main.js がメトロノーム/グリッドボタン・グリッド分割セレクタ・BPM 欄を
+  state へ同期し applyGrid() する
+
+### 検証（`test/tests-mastersave.js`・グループ [43][44]・37件）
+save→load 往復で全設定一致 / HRTF 中の保存が binaural になる / 欠落フィールドの既定値
+フォールバック / 最小構成の旧形式が開ける / ノブのドラッグ・ダブルクリック・バイパスが
+undo 1エントリで表示も追従。

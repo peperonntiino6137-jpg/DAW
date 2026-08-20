@@ -62,6 +62,29 @@ DAW.objaudio = {
     return this.mode === this.MODE_SPEAKERS ? this.layout().length : 2;
   },
 
+  // ---- 出力形式の保存/復元（プロジェクト保存用）----
+  //
+  // 保存するのは「ユーザーの明示選択」= バイノーラル / スピーカーの別と配置だけ。
+  // equalpower / hrtf の別は autoHrtf の自動切替（試聴中だけ HRTF）が決める一時状態なので、
+  // 保存した瞬間のモードを固定すると復元時に自動切替と食い違う。UI（objui.OUT_MODES）と
+  // 同じ2値に落として保存し、復元後の等パワー ↔ HRTF は従来どおり自動切替に任せる。
+  OUTPUT_DEFAULTS: { mode: 'binaural', layout: '5.1' },
+
+  outputToJSON() {
+    return {
+      mode: this.mode === this.MODE_SPEAKERS ? 'speakers' : 'binaural',
+      layout: this.layoutName,
+    };
+  },
+
+  // プロジェクト読み込み用。欠落や未知の値は既定値（バイノーラル / 5.1）で補完する。
+  // バイノーラルはまず軽い等パワーへ入れる（試聴時の HRTF 化は autoHrtf が担う）。
+  loadOutput(src) {
+    const s = src && typeof src === 'object' ? src : {};
+    this.layoutName = this.LAYOUTS[s.layout] ? s.layout : this.OUTPUT_DEFAULTS.layout;
+    this.setModeQuiet(s.mode === 'speakers' ? this.MODE_SPEAKERS : this.MODE_EQUALPOWER);
+  },
+
   live: new Map(),   // objId -> ノード一式（ライブ用。オフライン書き出しでは保持しない）
 
   // 書き出し中のレンダリング範囲 {from, until}（プロジェクト絶対時間）。
