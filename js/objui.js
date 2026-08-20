@@ -125,6 +125,8 @@ DAW.objui = {
       revKnobs: $('obj-rev-knobs'),
       limByp: $('obj-lim-byp'),
       out: $('obj-out'),
+      admBtn: $('obj-adm'),
+      wavsBtn: $('obj-wavs'),
     };
     if (!this.els.dock || !this.els.top) return;   // DOM が無いページでは何もしない
     this._inited = true;
@@ -1809,6 +1811,22 @@ DAW.objui = {
       DAW.limiter.setEnabled(!DAW.limiter.enabled);
       this.renderRenderer();
     });
+    // オブジェクト書き出し（ADM / オブジェクト別 WAV）。実処理は js/adm.js。
+    // 実行中はボタンを無効化して二重起動を防ぐ（トランスポートの書き出しボタンと同じ作法）
+    const wireExport = (btn, run, busyLabel) => {
+      if (!btn) return;
+      const label = btn.textContent;
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.textContent = busyLabel;
+        try { await run(); } finally {
+          btn.disabled = false;
+          btn.textContent = label;
+        }
+      });
+    };
+    wireExport(e.admBtn, () => DAW.adm.exportAdm(), '書き出し中…');
+    wireExport(e.wavsBtn, () => DAW.adm.exportObjects(), '書き出し中…');
   },
 
   // 共通ノブ（DAW.knob）に乗せる。挙動は従来のリミッターノブと互換:

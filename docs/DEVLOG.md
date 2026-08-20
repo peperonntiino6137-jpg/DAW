@@ -1022,3 +1022,81 @@ Worklet には「タイムライン位置 tl = pos0 + (ctx時刻 − ctxTime0) �
 ### 検証（`test/tests-objreverb.js`・グループ [42]・64件）
 データモデル往復・undo・lock / 距離式 / センド0のバイナリ一致 / 残響尾 / 経路 dist 追従 /
 5.1 の 6ch 維持と分配 / RENDERER・ストリップのノブ。全 1202 件パス。
+
+## WAV 書き出しの一般化（`js/wav.js`・2026-08-20）
+
+`encodeWav16` を `encodeWav(buffer, { bitDepth: 16 | 24 | '32f' })` へ一般化。
+`encodeWav16` は encodeWav(16) の別名として残し、既存呼び出し（保存の base64 埋め込み・
+`js/stems.js` の Python サイドカー入力）はバイト互換のまま。stems 側は審査指摘どおり
+`encodeWav(..., { bitDepth: 16 })` の明示呼び出しへ追従させた（サイドカーの入力は 16bit 固定）。
+
+- **24bit**: PCM (format tag 1)。3 バイト LE を手書き。丸めは 16bit と同じゼロ方向切り捨て
+  （負は ×8388608、正は ×8388607、±1.0 クランプ）
+- **32bit float**: IEEE float (format tag 3)。仕様どおり fmt チャンクを 18 バイト（cbSize=0）にし、
+  fact チャンク（dwSampleLength）も書く。サンプルはクランプせずそのまま保存するので、
+  **0dBFS 超のミックスでも歪まない**。このため 0dBFS 超の確認ダイアログは 32f では出さない
+  （整数深度のときだけ従来どおり警告）
+- **サンプルレート指定**: `DAW.wav.exportOptions = { bitDepth, sampleRate }`（sampleRate 0 =
+  ライブと同一 = 従来既定）。exportMix が `OfflineAudioContext(ch, len, sr)` に渡すだけで、
+  リサンプリングはレンダリング自体が指定レートで走ることで実現される
+- **UI**: 書き出しボタンの左に小さな `<select>` 2 つ（16/24/32f、SRそのまま/44.1k/48k/96k）。
+  値の正は `DAW.wav.exportOptions`、main.js が change で反映
+
+検証は `test/tests-wavfmt.js`（グループ [43]・19件）: 各深度の fmt ヘッダ（tag/bits/blockAlign/
+byteRate/fact）、既知振幅の量子化値の数値固定（0.5 → 16383 / 4194303、float は無変換）、
+exportMix 経路での深度・レート反映、32f の 1.0 超サンプル保存と確認ダイアログの抑制。
+なお共通の轍として、集約スイートは開始時に H.alerts / H.confirms を必ず空にすること
+（前のスイートが残したモーダルを拾って誤 FAIL する。今回実際に踏んだ）。
+
+## ADM (ITU-R BS.2076) 書き出しとオブジェクト別書き出し（`js/adm.js`・2026-08-20）
+
+RENDERER 画面に「オブジェクト書き出し」セクションを追加。ADM メタデータ付き BW64 と、
+オブジェクトごとのモノラル WAV（個別ダウンロード）の 2 系統。どちらも同じ
+「モノラル素レンダリング」生成器を共有する。
+
+### コンテナ（BW64 / BS.2088）
+
+`BW64` / `ds64` / `fmt` / `chna` / `axml` / `data` の順。**BW64 と data のサイズフィールドは
+常に 0xFFFFFFFF とし、実サイズは ds64（riffSize/dataSize/sampleCount の 64bit）に持つ**。
+4GB 未満でも RF64 流儀で統一し、サイズ分岐を持たない（判断: 分岐ゼロのほうが単純で、
+ADM を読むツールは BW64/RF64 を必ず解釈できる）。音声本体は 24bit PCM 固定
+（放送実務の標準。書き出しオプションのレート指定には従う）。
+
+### メタデータ（axml）
+
+ebuCoreMain でラップした audioFormatExtended（version ITU-R_BS.2076-2）。オブジェクトごとに
+audioProgramme(1個) → audioContent → audioObject → audioPackFormat/audioChannelFormat
+（typeLabel 0003 = Objects）に加え、**PCM の完全チェーン audioStreamFormat / audioTrackFormat /
+audioTrackUID も出す**。BS.2076-2 の「audioTrackUID → audioChannelFormat 直接参照」の省略形は
+使わない（chna の trackRef が audioTrackFormatID を指す従来解釈のツールとの互換を優先）。
+chna は 1 エントリ 40 バイト（trackIndex u16 + UID 12 + trackRef 14 + packRef 11 + pad 1）。
+
+- 座標はデータモデルが最初から ADM 準拠の極座標なので**無変換**（objects.js の設計が回収された）
+- **distance は必ず出力**（0〜1）。省略されがちな距離を常に持つのがこの DAW の差別化点
+- 経路は `objaudio.bakeTimes`（20ms 刻み + waypoint 時刻。書き出しの焼き込みと同一）で
+  サンプリングし、隣接時刻の区間を audioBlockFormat にする。ADM の補間規則（ブロック値は
+  前ブロック値から duration かけて線形補間）に合わせて**各ブロックの位置は区間終端の値**。
+  先頭ブロックだけは前ブロックが無いので初期位置（誤差は最大 20ms ぶんの移動量）。
+  rtime/duration は "hh:mm:ss.fffff"（小数第5位）
+- チャンネル数の上限は設けない（BS.2076 自体に上限規定は無い。実質上限はオブジェクト数の
+  MAX=128 で、chna エントリも 128 × 40B で問題ない）
+- 書き出し範囲は exportMix と同じ規則（ループ区間が有効ならその区間）
+
+### 音声本体（モノラル素レンダリング）
+
+割り当てトラックのクリップを 1ch の OfflineAudioContext でレンダリングする。
+**定位（パン/オブジェクトパンナー）・ルームリバーブ・トラック FX は通さない**。
+トラックの volume/mute/solo とオブジェクトの gainDb/mute/solo は反映する。
+判断: ADM の思想は「素の音 + メタデータで再生側が定位」。FX を含めるかは両論あるが、
+「素」を優先し FX は含めない（FX 込みが欲しければ通常の WAV 書き出しがある）。
+未割り当てオブジェクトは音を持てないため書き出し対象外（0 件なら alert）。
+
+オブジェクト別 WAV は同じ生成器の出力を `encodeWav`（書き出しオプションのビット深度）で
+1 本ずつダウンロードする。ファイル名は `連番_オブジェクト名.wav`（禁止文字は _ に置換）。
+
+### 検証（`test/tests-adm.js`・グループ [44]・34件）
+
+静止オブジェクトの XML 構造（要素・typeLabel・座標値・UID 整合）/ 経路の blockFormat 列
+（6 ブロックの rtime/duration/position を数値固定・隙間なし・distance 全出力）/ BW64 ヘッダ
+（magic・ds64 実サイズ・chna の UID 対応）/ 複数オブジェクトのインターリーブ振幅 /
+オブジェクト別書き出しの ch 数・長さ・素の振幅・ミュートの無音化。全 1257 件パス。
