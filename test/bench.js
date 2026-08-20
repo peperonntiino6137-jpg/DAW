@@ -176,6 +176,25 @@ T('[BENCH] 128オブジェクトの負荷', async () => {
   const json = JSON.stringify(DAW.objects.toJSON());
   B('OB.10 オブジェクトのメタデータ量', true, (json.length / 1024).toFixed(1) + 'KB / 128個');
 
+  // 経路の補間（followPaths の中身）。128個 × 8waypoint を 60fps × 5秒ぶん = 300フレーム。
+  // rAF 1フレームに収まるかの目安（1フレームあたり 128 回の pathPosAt）。
+  for (const o of DAW.objects.list) {
+    o.path.enabled = true;
+    o.path.points = [];
+    for (let k = 0; k < 8; k++) {
+      o.path.points.push({ t: k * 2, az: (k * 45) % 360 - 180, el: (k % 3) * 30 - 30, dist: 0.5 + (k % 2) * 0.5,
+        ease: DAW.objects.EASES[k % 4] });
+    }
+  }
+  const tPath = t(() => {
+    for (let f = 0; f < 300; f++) {
+      const pos = f * 14 / 300;
+      for (const o of DAW.objects.list) DAW.objects.pathPosAt(o, pos);
+    }
+  });
+  B('OB.11 経路の補間 128個 × 300フレーム', tPath < 500,
+    tPath.toFixed(1) + 'ms（1フレームあたり ' + (tPath / 300).toFixed(3) + 'ms）');
+
   DAW.objects.clear();
   DAW.project.tracks = [];
   DAW.ui.renderTracks();

@@ -69,6 +69,13 @@ DAW.objui = {
   fdrag: null,        // 正面ビューのドラッグ中の状態 { id, back, moved }
   sdrag: null,        // 3D球ビューのドラッグ中の状態 { id, near, moved }
   kdrag: null,        // ノブのドラッグ中の状態 { key, y0, v0 }
+  pdrag: null,        // 経路編集のドラッグ中の状態 { id, view, kind:'move'|'time', index, ... }
+  pathEdit: false,    // 経路の編集モード（TOP VIEW ヘッダの「編集」トグル）
+  pathSel: null,      // 選択中の waypoint 番号（時間チップの表示・ドラッグ対象）
+  // セグメントの緩急をひと目で示すグリフ（= 等速 / ↗ 加速 / ↘ 減速 / ~ S字）
+  EASE_GLYPHS: { linear: '=', in: '↗', out: '↘', inout: '~' },
+  PATH_EASE_HIT: 9,   // イージンググリフのヒット判定半径(px)
+  CHIP_PX_PER_STEP: 8,   // 時間チップのドラッグ: 8px = 0.1s
   strips: new Map(),  // id -> ストリップDOM（可視ぶんだけ）
   peaks: new Map(),   // id -> ピーク（線形）。0 なら -∞ 表示
   knobs: new Map(),   // key -> ノブDOM
@@ -94,6 +101,8 @@ DAW.objui = {
       front: $('obj-front'),
       sphereWrap: $('obj-sphereview'),
       sphere: $('obj-sphere'),
+      pathEnable: $('obj-path-enable'),
+      pathEditBtn: $('obj-path-edit'),
       stripScroll: $('obj-strip-scroll'),
       strips: $('obj-strips'),
       master: $('obj-master'),
@@ -116,11 +125,22 @@ DAW.objui = {
     this.els.add.addEventListener('click', () => this.addObject());
     this.els.del.addEventListener('click', () => this.removeSelected());
 
+    // 経路（位置オートメーション）のトグルと編集モード
+    if (this.els.pathEnable) this.els.pathEnable.addEventListener('click', () => this.togglePathEnabled());
+    if (this.els.pathEditBtn) this.els.pathEditBtn.addEventListener('click', () => this.togglePathEdit());
+
     // トップビューのドラッグ。move/up は window で受ける（canvas の外へ出ても追従させる）
     this.els.top.addEventListener('pointerdown', e => this.onTopDown(e));
     window.addEventListener('pointermove', e => this.onTopMove(e));
     window.addEventListener('pointerup', e => this.onTopUp(e));
     window.addEventListener('pointercancel', e => this.onTopUp(e));
+
+    // 経路編集のドラッグ（waypoint 移動 / 時間チップ）。トップ・正面ビュー共通で pdrag が持つ
+    window.addEventListener('pointermove', e => this.onPathMove(e));
+    window.addEventListener('pointerup', () => this.onPathUp());
+    window.addEventListener('pointercancel', () => this.onPathUp());
+    // waypoint の右クリック = 削除（編集モード中のみ。ブラウザメニューは出さない）
+    this.els.top.addEventListener('contextmenu', e => this.onPathContext(e, 'top'));
 
     // 正面ビューのドラッグ（az/el のみ。距離はトップビュー側で操作する）
     if (this.els.front) {
@@ -128,6 +148,7 @@ DAW.objui = {
       window.addEventListener('pointermove', e => this.onFrontMove(e));
       window.addEventListener('pointerup', e => this.onFrontUp(e));
       window.addEventListener('pointercancel', e => this.onFrontUp(e));
+      this.els.front.addEventListener('contextmenu', e => this.onPathContext(e, 'front'));
     }
 
     // 3D球ビューのドラッグ（az/el のみ。距離はトップビュー側で操作する）
@@ -183,6 +204,7 @@ DAW.objui = {
     this._rendering = true;
     try {
       this.updateCount();
+      this.syncPathTools();
       this.drawTop();
       this.drawFront();
       this.drawSphere();
@@ -276,8 +298,10 @@ DAW.objui = {
 
   // 点の大きさ・明るさで elevation を示す（真上からの図には高さが出せないため）
   dotRadius(el) { return 4.5 + 3.5 * ((el + 90) / 180); },
-  dotAlpha(obj) {
-    const base = 0.5 + 0.5 * ((obj.el + 90) / 180);
+  // el は表示位置の仰角（経路が動かすので obj.el と別に渡せる。省略時は obj.el）
+  dotAlpha(obj, el) {
+    const e = el == null ? obj.el : el;
+    const base = 0.5 + 0.5 * ((e + 90) / 180);
     // ミュート / 他がソロ中のオブジェクトは薄くして「鳴っていない」ことを示す
     return DAW.objects.effectiveGain(obj) > 0 ? base : base * 0.3;
   },
@@ -347,25 +371,37 @@ DAW.objui = {
     g2.lineTo(g.cx, g.cy - 10);
     g2.stroke();
 
+    // 選択中オブジェクトの経路（点より下のレイヤーに描く）
+    const sel = DAW.objects.selected();
+    if (sel && sel.path && sel.path.enabled && sel.path.points.length) {
+      this.drawPath(g2, sel, p => this.posToXY(p.az, p.dist, g));
+    }
+
     // オブジェクト。選択中は最後に重ねて必ず手前に出す
     // （ドラッグ中は毎フレーム走るので、並べ替え用の配列は作らない）。
-    const sel = DAW.objects.selected();
     for (const obj of DAW.objects.list) {
       if (obj !== sel) this.drawObject(g2, obj, g, false);
     }
     if (sel) this.drawObject(g2, sel, g, true);
   },
 
+  // 表示用の現在位置。経路が有効なら再生ヘッド位置の経路上の点（停止中も追従する）。
+  dispPos(obj) {
+    return DAW.objects.posAt(obj, DAW.audio.displayPos ? DAW.audio.displayPos() : 0);
+  },
+
   drawObject(g2, obj, g, isSel) {
-    const p = this.posToXY(obj.az, obj.dist, g);
-    const r = this.dotRadius(obj.el);
-    g2.globalAlpha = this.dotAlpha(obj);
+    const pos = this.dispPos(obj);
+    const p = this.posToXY(pos.az, pos.dist, g);
+    const r = this.dotRadius(pos.el);
+    g2.globalAlpha = this.dotAlpha(obj, pos.el);
     g2.fillStyle = obj.color;
     g2.beginPath();
     g2.arc(p.x, p.y, r, 0, Math.PI * 2);
     g2.fill();
     g2.globalAlpha = 1;
-    if (obj.lock !== 'none') {           // 固定中は輪郭を破線にする
+    // 固定中と経路有効中は輪郭を破線にする（どちらも「手では直接動かせない」印）
+    if (obj.lock !== 'none' || (obj.path && obj.path.enabled)) {
       g2.strokeStyle = 'rgba(255,255,255,0.55)';
       g2.setLineDash([2, 2]);
       g2.beginPath();
@@ -386,12 +422,13 @@ DAW.objui = {
     g2.fillText(obj.name, p.x, p.y - r - 7);
   },
 
-  // ポインタ位置に最も近いオブジェクト（HIT_PX 以内）
+  // ポインタ位置に最も近いオブジェクト（HIT_PX 以内）。描画と同じ表示位置（経路込み）で判定する
   hitTest(clientX, clientY, g) {
     let best = null;
     let bestD = this.HIT_PX;
     for (const obj of DAW.objects.list) {
-      const p = this.posToXY(obj.az, obj.dist, g);
+      const pos = this.dispPos(obj);
+      const p = this.posToXY(pos.az, pos.dist, g);
       const d = Math.hypot(clientX - p.x, clientY - p.y);   // topGeom の cx/cy はクライアント座標
       if (d <= bestD) { bestD = d; best = obj; }
     }
@@ -401,10 +438,14 @@ DAW.objui = {
   onTopDown(e) {
     if (e.button !== 0) return;
     const g = this.topGeom();
+    // 経路の編集モード中はすべて経路の操作（追加 / 移動 / 緩急 / 時刻）に振り分ける
+    if (this.pathEditActive() && this.onPathDown(e, g, 'top')) return;
     const hit = this.hitTest(e.clientX, e.clientY, g);
     if (hit) DAW.objects.select(hit.id);
     const obj = DAW.objects.selected();
     if (!obj) return;
+    // 経路が有効なオブジェクトは位置を経路が決めるので、通常モードでは選択のみ（動かさない）
+    if (obj.path && obj.path.enabled) { this.render(); return; }
     // ドラッグ中は history.commit() を呼ばない。pointerup で1回だけ呼んで
     // 「ドラッグ開始〜終了で undo 1エントリ」にする（js/ui.js の startClipDrag と同じ方式）。
     this.drag = { id: obj.id, moved: false };
@@ -431,6 +472,300 @@ DAW.objui = {
   moveTo(id, clientX, clientY, g) {
     const p = this.xyToPos(clientX, clientY, g);
     return DAW.objects.setPosition(id, p.az, null, p.dist);
+  },
+
+  // ---- 経路（位置オートメーション）の編集 ----
+  //
+  // state は DAW.objects の path 編集 API 一本（ここは座標変換とヒット判定だけ）。
+  // undo の粒度は既存の流儀どおり: ドラッグ系は pointerup で commit 1回、
+  // クリック追加 / 緩急切替 / 削除 / トグルは直後に 1回。
+
+  togglePathEnabled() {
+    const obj = DAW.objects.selected();
+    if (!obj) return false;
+    if (!DAW.objects.setPathEnabled(obj.id, !(obj.path && obj.path.enabled))) {
+      this.render();   // lock 中などで拒否されてもボタンの見た目は揃え直す
+      return false;
+    }
+    this.render();
+    DAW.history.commit();
+    return true;
+  },
+
+  togglePathEdit() {
+    this.pathEdit = !this.pathEdit;
+    this.render();
+    return this.pathEdit;
+  },
+
+  // ボタンの状態同期（render から呼ばれる）。選択が消えた/点が減ったときの pathSel もここで直す
+  syncPathTools() {
+    const e = this.els;
+    if (!e.pathEnable) return;
+    const obj = DAW.objects.selected();
+    const on = !!(obj && obj.path && obj.path.enabled);
+    e.pathEnable.disabled = !obj;
+    e.pathEnable.classList.toggle('on', on);
+    e.pathEditBtn.disabled = !obj;
+    e.pathEditBtn.classList.toggle('on', this.pathEdit);
+    // undo などで waypoint が減って番号が範囲外になったら選択を外す
+    if (this.pathSel != null && (!obj || !obj.path || this.pathSel >= obj.path.points.length)) this.pathSel = null;
+  },
+
+  // 経路編集の操作が生きているか（編集トグル ON かつ選択オブジェクトの経路が有効）
+  pathEditActive() {
+    const obj = DAW.objects.selected();
+    return this.pathEdit && !!obj && !!(obj.path && obj.path.enabled);
+  },
+
+  // waypoint → 画面座標（view ごとの射影）。g は各ビューの幾何（クライアント/キャンバスどちらでも）
+  pathProj(view, g) {
+    return view === 'front'
+      ? p => this.frontXY(p.az, p.el, p.dist, g)
+      : p => this.posToXY(p.az, p.dist, g);
+  },
+
+  // ポインタに最も近い waypoint 番号（HIT_PX 以内。無ければ -1）
+  pathHit(clientX, clientY, pts, toXY) {
+    let best = -1;
+    let bestD = this.HIT_PX;
+    for (let i = 0; i < pts.length; i++) {
+      const q = toXY(pts[i]);
+      const d = Math.hypot(clientX - q.x, clientY - q.y);
+      if (d <= bestD) { bestD = d; best = i; }
+    }
+    return best;
+  },
+
+  // ポインタ位置のイージンググリフ（セグメント中点）の番号（無ければ -1）
+  easeHit(clientX, clientY, pts, toXY) {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const mid = toXY(DAW.objects.pathSegPos(pts[i], pts[i + 1], 0.5));
+      if (Math.hypot(clientX - mid.x, clientY - mid.y) <= this.PATH_EASE_HIT) return i;
+    }
+    return -1;
+  },
+
+  // 選択 waypoint の下に出す時間チップの矩形。描画とヒット判定で同じ式を使う
+  chipRect(x, y, t) {
+    const text = '@' + t.toFixed(1) + 's';
+    const w = 10 + text.length * 5.5;
+    return { x: x - w / 2, y: y + 9, w, h: 13, text };
+  },
+
+  // pointerdown の振り分け（pathEditActive のときだけ呼ばれる）。常に true を返して
+  // 通常のドラッグ処理へは流さない（編集モード中の誤爆防止）。
+  onPathDown(e, g, view) {
+    const obj = DAW.objects.selected();
+    const pts = obj.path.points;
+    const toXY = this.pathProj(view, g);
+    const canvas = view === 'front' ? this.els.front : this.els.top;
+    // 1) 選択 waypoint の時間チップ = 左右ドラッグで時刻調整
+    if (this.pathSel != null && pts[this.pathSel]) {
+      const wp = toXY(pts[this.pathSel]);
+      const r = this.chipRect(wp.x, wp.y, pts[this.pathSel].t);
+      if (e.clientX >= r.x && e.clientX <= r.x + r.w && e.clientY >= r.y && e.clientY <= r.y + r.h) {
+        this.pdrag = { id: obj.id, view, kind: 'time', index: this.pathSel, x0: e.clientX, t0: pts[this.pathSel].t };
+        try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* 合成イベントでは失敗する */ }
+        return true;
+      }
+    }
+    // 2) waypoint = 選択してドラッグ移動
+    const wi = this.pathHit(e.clientX, e.clientY, pts, toXY);
+    if (wi >= 0) {
+      this.pathSel = wi;
+      this.pdrag = {
+        id: obj.id, view, kind: 'move', index: wi, moved: false,
+        // 正面ビューは前後（z の符号）が画面から決められないので、掴んだ時点の半球を保持する
+        back: view === 'front' ? DAW.objaudio.toCartesian(pts[wi].az, pts[wi].el, 1).z > 0 : false,
+      };
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* 合成イベント */ }
+      this.render();
+      return true;
+    }
+    // 3) セグメント中点のグリフ = 緩急の循環
+    const si = this.easeHit(e.clientX, e.clientY, pts, toXY);
+    if (si >= 0) {
+      if (DAW.objects.cyclePathEase(obj.id, si)) {
+        this.render();
+        DAW.history.commit();
+      }
+      return true;
+    }
+    // 4) 空き = waypoint 追加
+    this.addWaypointAt(obj, e.clientX, e.clientY, g, view);
+    return true;
+  },
+
+  // 追加する waypoint の時刻。基本は max(再生ヘッド位置, 最終点 t + 0.1s)。
+  // ヘッドが 0 のまま（動かしていない）なら 1s 間隔で末尾へ足していく。
+  nextPathTime(obj) {
+    const pts = obj.path.points;
+    const head = DAW.audio.displayPos ? DAW.audio.displayPos() : 0;
+    const lastT = pts.length ? pts[pts.length - 1].t : null;
+    if (head > 0) return lastT == null ? head : Math.max(head, lastT + 0.1);
+    return lastT == null ? 0 : lastT + 1;
+  },
+
+  // 空きクリックでの waypoint 追加。ビューが持たない座標軸は直前の点（無ければ静的位置）から継ぐ
+  addWaypointAt(obj, clientX, clientY, g, view) {
+    const pts = obj.path.points;
+    const prev = pts.length ? pts[pts.length - 1] : null;
+    let az, el, dist;
+    if (view === 'front') {
+      dist = prev ? prev.dist : obj.dist;
+      const back = prev
+        ? DAW.objaudio.toCartesian(prev.az, prev.el, 1).z > 0
+        : DAW.objaudio.toCartesian(obj.az, obj.el, 1).z > 0;
+      const d = this.frontToDir(clientX, clientY, g, dist, back);
+      az = d.az;
+      el = d.el;
+    } else {
+      const p = this.xyToPos(clientX, clientY, g);
+      az = p.az;
+      dist = p.dist;
+      el = prev ? prev.el : obj.el;
+    }
+    const pt = DAW.objects.addPathPoint(obj.id, { t: this.nextPathTime(obj), az, el, dist });
+    if (!pt) { this.render(); return false; }   // lock 中は追加できない
+    this.pathSel = obj.path.points.indexOf(pt);
+    this.render();
+    DAW.history.commit();
+    return true;
+  },
+
+  onPathMove(e) {
+    const d = this.pdrag;
+    if (!d) return;
+    d.moved = true;
+    const obj = DAW.objects.get(d.id);
+    if (!obj || !obj.path || !obj.path.points[d.index]) { this.pdrag = null; return; }
+    if (d.kind === 'time') {
+      // 8px = 0.1s。前後の点 ±0.05s のクランプはモデル側（setPathPointTime）が守る
+      DAW.objects.setPathPointTime(d.id, d.index, d.t0 + (e.clientX - d.x0) / this.CHIP_PX_PER_STEP * 0.1);
+    } else if (d.view === 'front') {
+      const pt = obj.path.points[d.index];
+      const dir = this.frontToDir(e.clientX, e.clientY, this.frontGeom(), pt.dist, d.back);
+      DAW.objects.movePathPoint(d.id, d.index, dir.az, dir.el, null);
+    } else {
+      const p = this.xyToPos(e.clientX, e.clientY, this.topGeom());
+      DAW.objects.movePathPoint(d.id, d.index, p.az, null, p.dist);
+    }
+    this.render();
+  },
+
+  onPathUp() {
+    if (!this.pdrag) return;
+    this.pdrag = null;
+    this.render();
+    DAW.history.commit();   // ドラッグ全体で 1 エントリ（変化が無ければ何も積まれない）
+  },
+
+  // waypoint の右クリック = 削除。編集モード中だけ反応し、当たったときのみメニューを抑止する
+  onPathContext(e, view) {
+    if (!this.pathEditActive()) return;
+    const obj = DAW.objects.selected();
+    const g = view === 'front' ? this.frontGeom() : this.topGeom();
+    const wi = this.pathHit(e.clientX, e.clientY, obj.path.points, this.pathProj(view, g));
+    if (wi < 0) return;
+    e.preventDefault();
+    if (!DAW.objects.removePathPoint(obj.id, wi)) return;
+    if (this.pathSel != null) {
+      if (this.pathSel === wi) this.pathSel = null;
+      else if (this.pathSel > wi) this.pathSel--;
+    }
+    this.render();
+    DAW.history.commit();
+  },
+
+  // 経路の描画（選択中オブジェクトのみ。トップ/正面ビュー共通で toXY だけ差し替える）。
+  // ポリラインは 2° 刻み程度でサンプリングし、±180 跨ぎの最短弧が曲線として見えるようにする。
+  drawPath(g2, obj, toXY) {
+    const O = DAW.objects;
+    const pts = obj.path.points;
+    g2.save();
+    // 半透明ポリライン（オブジェクト色）
+    if (pts.length > 1) {
+      g2.globalAlpha = 0.45;
+      g2.strokeStyle = obj.color;
+      g2.lineWidth = 1.5;
+      g2.beginPath();
+      const q0 = toXY(pts[0]);
+      g2.moveTo(q0.x, q0.y);
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        // 最短弧の角距離に応じて分割数を決める（約2°刻み。直線的な区間は少なくて済む）
+        let arc = ((b.az - a.az) % 360 + 360) % 360;
+        if (arc > 180) arc = 360 - arc;
+        const steps = Math.max(4, Math.ceil(arc / 2));
+        for (let s = 1; s <= steps; s++) {
+          const q = toXY(O.pathSegPos(a, b, s / steps));
+          g2.lineTo(q.x, q.y);
+        }
+      }
+      g2.stroke();
+      g2.globalAlpha = 1;
+    }
+    // セグメント中点の緩急グリフ（= / ↗ / ↘ / ~）
+    g2.font = '10px Consolas, monospace';
+    g2.textAlign = 'center';
+    g2.textBaseline = 'middle';
+    for (let i = 0; i < pts.length - 1; i++) {
+      const mid = toXY(O.pathSegPos(pts[i], pts[i + 1], 0.5));
+      g2.fillStyle = 'rgba(255,255,255,0.85)';
+      g2.fillText(this.EASE_GLYPHS[pts[i].ease] || '=', mid.x, mid.y);
+    }
+    // waypoint（菱形 + 番号）。選択中は白の輪郭で強調
+    for (let i = 0; i < pts.length; i++) {
+      const q = toXY(pts[i]);
+      const r = 5;
+      g2.fillStyle = obj.color;
+      g2.strokeStyle = i === this.pathSel ? '#fff' : 'rgba(255,255,255,0.5)';
+      g2.lineWidth = i === this.pathSel ? 2 : 1;
+      g2.beginPath();
+      g2.moveTo(q.x, q.y - r);
+      g2.lineTo(q.x + r, q.y);
+      g2.lineTo(q.x, q.y + r);
+      g2.lineTo(q.x - r, q.y);
+      g2.closePath();
+      g2.fill();
+      g2.stroke();
+      g2.fillStyle = '#cfcfda';
+      g2.font = '9px Consolas, monospace';
+      g2.textAlign = 'left';
+      g2.textBaseline = 'bottom';
+      g2.fillText(String(i + 1), q.x + r + 2, q.y - 2);
+    }
+    // 始点マーカー ▶（進行方向が分かるように最初の点の左に置く）
+    if (pts.length) {
+      const q = toXY(pts[0]);
+      g2.fillStyle = 'rgba(255,255,255,0.85)';
+      g2.beginPath();
+      g2.moveTo(q.x - 13, q.y - 4);
+      g2.lineTo(q.x - 7, q.y);
+      g2.lineTo(q.x - 13, q.y + 4);
+      g2.closePath();
+      g2.fill();
+    }
+    // 選択 waypoint の時間チップ「@2.0s」（左右ドラッグで時刻調整）
+    if (this.pathSel != null && pts[this.pathSel]) {
+      const q = toXY(pts[this.pathSel]);
+      const r = this.chipRect(q.x, q.y, pts[this.pathSel].t);
+      g2.fillStyle = 'rgba(10,10,14,0.75)';
+      g2.strokeStyle = 'rgba(255,255,255,0.4)';
+      g2.lineWidth = 1;
+      g2.beginPath();
+      g2.rect(r.x, r.y, r.w, r.h);
+      g2.fill();
+      g2.stroke();
+      g2.fillStyle = '#dfe7ff';
+      g2.font = '9px Consolas, monospace';
+      g2.textAlign = 'center';
+      g2.textBaseline = 'middle';
+      g2.fillText(r.text, r.x + r.w / 2, r.y + r.h / 2 + 0.5);
+    }
+    g2.restore();
   },
 
   // ---- 正面ビュー（FRONT VIEW）----
@@ -539,17 +874,26 @@ DAW.objui = {
     g2.arc(g.cx, g.cy, 5, 0, Math.PI * 2);
     g2.stroke();
 
+    // 選択中オブジェクトの経路（点より下のレイヤーに描く。トップビューと同じ流儀）
+    const sel = DAW.objects.selected();
+    if (sel && sel.path && sel.path.enabled && sel.path.points.length) {
+      this.drawPath(g2, sel, p => this.frontXY(p.az, p.el, p.dist, g));
+    }
+
     // オブジェクト。後方（z>0）を先に描き、前方が上書きする＝実際の見え方と一致する。
     // 選択中は最後に重ねて必ず手前に出す（トップビューと同じ流儀）。
-    const sel = DAW.objects.selected();
     for (const pass of [true, false]) {
       for (const obj of DAW.objects.list) {
         if (obj === sel) continue;
-        const p = this.frontXY(obj.az, obj.el, obj.dist, g);
+        const pos = this.dispPos(obj);
+        const p = this.frontXY(pos.az, pos.el, pos.dist, g);
         if (p.back === pass) this.drawFrontObject(g2, obj, p, false);
       }
     }
-    if (sel) this.drawFrontObject(g2, sel, this.frontXY(sel.az, sel.el, sel.dist, g), true);
+    if (sel) {
+      const pos = this.dispPos(sel);
+      this.drawFrontObject(g2, sel, this.frontXY(pos.az, pos.el, pos.dist, g), true);
+    }
   },
 
   drawFrontObject(g2, obj, p, isSel) {
@@ -561,7 +905,8 @@ DAW.objui = {
     g2.arc(p.x, p.y, r, 0, Math.PI * 2);
     g2.fill();
     g2.globalAlpha = 1;
-    if (obj.lock !== 'none') {           // 固定中は輪郭を破線にする（他ビューと同じ）
+    // 固定中と経路有効中は輪郭を破線にする（他ビューと同じ）
+    if (obj.lock !== 'none' || (obj.path && obj.path.enabled)) {
       g2.strokeStyle = 'rgba(255,255,255,0.55)';
       g2.setLineDash([2, 2]);
       g2.beginPath();
@@ -583,12 +928,13 @@ DAW.objui = {
     g2.fillText(obj.name, p.x, p.y - r - 7);
   },
 
-  // ポインタ位置に最も近いオブジェクト（FRONT_HIT_PX 以内）
+  // ポインタ位置に最も近いオブジェクト（FRONT_HIT_PX 以内）。表示位置（経路込み）で判定する
   frontHit(clientX, clientY, g) {
     let best = null;
     let bestD = this.FRONT_HIT_PX;
     for (const obj of DAW.objects.list) {
-      const p = this.frontXY(obj.az, obj.el, obj.dist, g);
+      const pos = this.dispPos(obj);
+      const p = this.frontXY(pos.az, pos.el, pos.dist, g);
       const d = Math.hypot(clientX - p.x, clientY - p.y);   // frontGeom の cx/cy はクライアント座標
       if (d <= bestD) { bestD = d; best = obj; }
     }
@@ -598,10 +944,14 @@ DAW.objui = {
   onFrontDown(e) {
     if (e.button !== 0) return;
     const g = this.frontGeom();
+    // 経路の編集モード中はすべて経路の操作へ（トップビューと同じ振り分け）
+    if (this.pathEditActive() && this.onPathDown(e, g, 'front')) return;
     const hit = this.frontHit(e.clientX, e.clientY, g);
     if (hit) DAW.objects.select(hit.id);
     const obj = DAW.objects.selected();
     if (!obj) return;
+    // 経路が有効なオブジェクトは通常モードでは選択のみ（位置は経路が決める）
+    if (obj.path && obj.path.enabled) { this.render(); return; }
     // 掴んだ時点の半球（前/後）を覚える。移動前の位置から決めること
     // （frontMoveTo がこれを参照するので、fdrag を作ってから動かす）。
     this.fdrag = { id: obj.id, back: DAW.objaudio.toCartesian(obj.az, obj.el, 1).z > 0, moved: false };
@@ -726,9 +1076,13 @@ DAW.objui = {
   },
 
   // 描画順（遠い順）。ドラッグ中に毎フレーム走るので配列は1本だけ作る。
+  // 位置は表示位置（経路込み）で決める（トップ/正面ビューと同じ）。
   sphereOrder(g) {
     const out = [];
-    for (const obj of DAW.objects.list) out.push({ obj, p: this.projectDir(obj.az, obj.el, g) });
+    for (const obj of DAW.objects.list) {
+      const pos = this.dispPos(obj);
+      out.push({ obj, pos, p: this.projectDir(pos.az, pos.el, g) });
+    }
     out.sort((a, b) => b.p.depth - a.p.depth);   // depth が大きい = 遠い を先頭に
     return out;
   },
@@ -776,7 +1130,7 @@ DAW.objui = {
 
     // オブジェクトは遠い順に描く（奥のものが手前を上書きしない）
     const order = this.sphereOrder(g);
-    for (const it of order) this.drawSphereObject(g2, it.obj, it.p, g, it.obj.id === DAW.objects.selectedId);
+    for (const it of order) this.drawSphereObject(g2, it.obj, it.p, g, it.obj.id === DAW.objects.selectedId, it.pos);
     // ラベルだけは最後に重ねる（点の重なりで名前が読めなくならないように）
     const sel = order.find(it => it.obj.id === DAW.objects.selectedId);
     if (sel) {
@@ -917,16 +1271,17 @@ DAW.objui = {
   },
 
   // 1個ぶんの点。近いほど大きく描く（透視の k をそのまま使う）。
-  drawSphereObject(g2, obj, p, g, isSel) {
+  // pos は表示位置（経路込み。省略時は静的位置）。
+  drawSphereObject(g2, obj, p, g, isSel, pos) {
     const behind = p.depth > g.cam.D;
     const r = Math.max(3, 6 * (g.cam.D / Math.max(0.2, p.depth)));
-    g2.globalAlpha = this.dotAlpha(obj) * (behind ? 0.65 : 1);
+    g2.globalAlpha = this.dotAlpha(obj, pos ? pos.el : null) * (behind ? 0.65 : 1);
     g2.fillStyle = obj.color;
     g2.beginPath();
     g2.arc(p.x, p.y, r, 0, Math.PI * 2);
     g2.fill();
     g2.globalAlpha = 1;
-    if (obj.lock !== 'none') {
+    if (obj.lock !== 'none' || (obj.path && obj.path.enabled)) {
       g2.strokeStyle = 'rgba(255,255,255,0.55)';
       g2.setLineDash([2, 2]);
       g2.beginPath();
@@ -949,7 +1304,8 @@ DAW.objui = {
     let bestD = this.SPH_HIT_PX;
     let bestDepth = Infinity;
     for (const obj of DAW.objects.list) {
-      const p = this.projectDir(obj.az, obj.el, g);
+      const pos = this.dispPos(obj);
+      const p = this.projectDir(pos.az, pos.el, g);
       const d = Math.hypot(clientX - p.x, clientY - p.y);
       if (d > this.SPH_HIT_PX) continue;
       if (d < bestD - 2 || (d < bestD + 2 && p.depth < bestDepth)) {
@@ -968,6 +1324,8 @@ DAW.objui = {
     if (hit) DAW.objects.select(hit.id);
     const obj = DAW.objects.selected();
     if (!obj) return;
+    // 経路が有効なオブジェクトは通常モードでは選択のみ（位置は経路が決める）
+    if (obj.path && obj.path.enabled) { this.render(); return; }
     // 掴んだ時点の半球を覚える。これが無いとドラッグ中に前後が跳ねる。
     const p = this.projectDir(obj.az, obj.el, g);
     this.sdrag = { id: obj.id, near: p.depth <= g.cam.D, moved: false };
@@ -1223,10 +1581,13 @@ DAW.objui = {
     }
 
     const movable = DAW.objects.canEditPosition(obj);   // 'pos' / 'all' は位置を編集させない
+    const pathOn = !!(obj.path && obj.path.enabled);    // 経路有効中は Az/El を経路が決める
     for (const key of ['az', 'el', 'width']) {
       const inp = r[key];
       if (inp !== act) inp.value = this.fmtNum(obj[key]);
-      inp.disabled = !movable;
+      const byPath = pathOn && (key === 'az' || key === 'el');
+      inp.disabled = !movable || byPath;
+      inp.title = byPath ? '経路（位置オートメーション）が位置を決めるため編集できません' : '';
     }
 
     r.lock.textContent = obj.lock === 'none' ? '自由' : obj.lock === 'pos' ? '位置固定' : '全固定';
@@ -1571,7 +1932,18 @@ DAW.objui = {
       mix(o.az * 1000); mix(o.el * 1000); mix(o.dist * 10000);
       mix(o.width * 100); mix(o.gainDb * 100);
       mix((o.mute ? 1 : 0) | (o.solo ? 2 : 0) | (o.lock === 'pos' ? 4 : o.lock === 'all' ? 8 : 0));
+      // 経路（有効フラグ + 各点の t/az/el/dist/ease）。混ぜ忘れると undo 後にビューが追従しない
+      const path = o.path || { enabled: false, points: [] };
+      mix(path.enabled ? 1 : 0);
+      mix(path.points.length);
+      for (const p of path.points) {
+        mix(p.t * 1000); mix(p.az * 1000); mix(p.el * 1000); mix(p.dist * 10000);
+        mix(DAW.objects.EASES.indexOf(p.ease) + 1);
+      }
     }
+    // 経路の編集モード / waypoint 選択もビューの見た目を変える
+    mix(this.pathEdit ? 1 : 0);
+    mix(this.pathSel == null ? -1 : this.pathSel);
     // トラックの追加/削除/改名/並び替えにも追従する（セレクタの options とバッジの表示が変わる）
     for (const t of DAW.project.tracks) {
       mixStr(t.id);
@@ -1593,6 +1965,14 @@ DAW.objui = {
 
   tick(now) {
     this.sync();
+    DAW.objaudio.followPaths();   // 経路のライブ追従（再生中でなければ no-op）
+    // 経路上を動くオブジェクトの現在位置を追う。canvas だけ描き直す
+    // （ストリップは値が変わらないので触らない。触ると入力中の欄と衝突する）
+    if (DAW.audio.isPlaying() && DAW.objects.list.some(o => o.path && o.path.enabled && o.path.points.length)) {
+      this.drawTop();
+      this.drawFront();
+      this.drawSphere();
+    }
     this.updateMeters(now || 0);
     requestAnimationFrame(t => this.tick(t));
   },

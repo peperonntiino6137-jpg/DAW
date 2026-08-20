@@ -484,6 +484,12 @@ input[type="range"] { accent-color: var(--accent); }
 }
 #obj-top { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
 
+/* 経路（位置オートメーション）のツール。TOP VIEW の右上に重ねる */
+#obj-path-tools { position: absolute; top: 2px; right: 6px; z-index: 1; display: flex; gap: 4px; }
+#obj-path-tools button { padding: 1px 7px; font-size: 10px; color: var(--dim); }
+#obj-path-tools button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+#obj-path-tools button:disabled { opacity: 0.4; }
+
 /* 正面ビュー（リスナーを背後から見た図）。横=左右、縦=高さ。距離はトップビューの担当。
    狭い画面では球ビューと同じくストリップ側を優先して縮む（min-width まで）。 */
 #obj-frontview {

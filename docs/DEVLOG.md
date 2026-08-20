@@ -565,3 +565,73 @@ main.js のキーハンドラに書かれていた処理を `DAW.ui` の共通�
   finally でクリップ削除 → `history.reset()` → `collectBuffers()` の順に掃除して解決。
 
 856/856 passed。
+
+## 経路（位置オートメーション）（`js/objects.js` / `js/objaudio.js` / `js/objui.js`・2026-08-20）
+
+オブジェクトが時間とともに空間を移動する「経路」を実装した。データは
+`obj.path = { enabled, points: [{ t, az, el, dist, ease }] }` で、`t` は**プロジェクト絶対時間**（秒）。
+拍ではなく秒にしたのは、ADM のオブジェクトオートメーション（blockFormat の rtime/duration）が
+時間ベースであり、将来 ADM 書き出しへ変換するときに BPM 依存の再計算が要らないため。
+
+### モデル（`js/objects.js`）
+
+- 補間はモデル層に一本化: `pathPosAt(obj, t)`（セグメント検索 + ease）、`azLerp(a, b, u)`
+  （±180 折り畳みの**最短弧**。+170 → -170 は 180 経由の 20° しか動かない）、`pathSegPos(p0, p1, u)`
+  （az 最短弧 / el・dist 線形）。描画のポリラインも書き出しの焼き込みも全部これを通すので、
+  「見えた軌跡」と「鳴った軌跡」がずれない。
+- **範囲外はホールド**: 最初の点より前・最後の点より後は端の位置に留まる。ゼロへ戻る等の
+  暗黙の動きを入れると「イントロでは正面に置きたいだけ」という使い方が壊れる。
+- ease は「その点から次の点へ向かう」セグメントに付く: linear（等速）/ in（加速 u²）/
+  out（減速 u(2−u)）/ inout（S字 u²(3−2u)）。
+- 編集 API（add/move/setTime/remove/cycleEase/setEnabled）はすべて normalize/clamp/changed() を通し、
+  lock は位置編集と同じ `canEditPosition()`（'none' のみ可）。同時刻の点は最小間隔 0.05s を強制し、
+  時刻変更は前後の点 ±0.05s でクランプするので順序が入れ替わらない。
+- 保存は toJSON/load に載せるだけで undo も自動で対応（履歴は toJSON スナップショット方式のため）。
+  load は欠落を `{enabled:false, points:[]}` で補い、不正 ease→linear、t 昇順ソート + 間隔強制。
+
+### レンダラー: ライブ = rAF 追従、書き出し = ランプ焼き込み（`js/objaudio.js`）
+
+- update() から位置反映部を `applyObjPosition(nodes, obj, pos, t)` に抽出した（width 2ソースの
+  widthAzimuths/widthGain 分岐込み）。update() / followPaths() が同じ関数を通り、実装が割れない。
+- **ライブ**は `followPaths()`（objui.tick から毎フレーム1行）。`isPlaying()` でなければ no-op、
+  再生中は `getPos()` の時刻で pathPosAt → applyObjPosition。setTargetAtTime(0.02s) で寄せるので
+  フレーム量子化はならされる。**ループ折り返し時の 〜20ms のグライドは仕様**（ジャンプを
+  即値で反映するとクリックノイズが出る方が害が大きい）。
+- **書き出し**は rAF が無いので `bakePath()` がランプ列を焼き込む: 移動区間だけ 20ms 固定
+  ステップ（`PATH_BAKE_DT`）+ 各 waypoint 時刻でサンプリングし、HRTF は positionX/Y/Z、
+  等パワーは gl/gr、VBAP は spk[i].gain へ setValueAtTime + linearRampToValueAtTime を予約する。
+  width ≠ 0 は2点それぞれに加えて **src.gain（widthGain）も焼く**: widthGain は方位で変わる正規化
+  係数なので、固定値のままだと経路の途中でライブと書き出しの音量がずれる（設計からの最小限の追加）。
+  前後のホールド区間は値が変わらないのでイベント2個に省略（60秒ホールドに3000イベントを
+  積まない）。刻みは `m0 + k*DT` で計算し、加算の誤差蓄積で waypoint 時刻と紛れるのを防ぐ。
+- **フックは exportRange 方式**: `wav.js` の exportMix がグラフを組む間だけ
+  `DAW.objaudio.exportRange = {from, until}` を立て、オフライン ctx での create() が
+  「live ctx でない ∧ exportRange あり ∧ path 有効」で bakePath を呼ぶ。trackDest() の
+  シグネチャを増やさずに済み、ライブ経路には一切影響しない（finally で必ず null へ戻す）。
+
+### UI（`js/objui.js`）
+
+- TOP VIEW ヘッダに「経路」（path.enabled）と「編集」（objui.pathEdit）のトグル。選択オブジェクト
+  の経路だけをトップ/正面ビューに描く: 半透明ポリライン（セグメントを約2°刻みでサンプリング
+  するので最短弧が曲線に見える）+ 始点▶ + 菱形 waypoint + 番号 + セグメント中点の緩急グリフ
+  （= / ↗ / ↘ / ~）+ 選択 waypoint 下の時間チップ「@2.0s」。
+- 操作は pathEdit ON のとき onTopDown/onFrontDown の先頭で分岐（pdrag を第4のドラッグ状態に）:
+  空きクリック = 追加（時刻は max(再生ヘッド, 最終点+0.1s)、ヘッドが 0 のままなら 1s 間隔）、
+  waypoint ドラッグ = 移動（TOP: az/dist、FRONT: az/el。半球保持は fdrag と同じ理屈）、
+  中点クリック = ease 循環、時間チップ左右ドラッグ = 時刻（8px=0.1s）、右クリック = 削除。
+  undo はドラッグ系 = pointerup で 1回、クリック系 = 直後に 1回（既存の流儀）。
+- 現在位置の点は `posAt(displayPos())` で描き、再生中は tick から canvas だけ再描画する
+  （ストリップは値が変わらないので触らない）。path 有効オブジェクトは通常モードでドラッグ不可
+  （選択のみ・破線輪郭）、ストリップの Az/El は disabled + title で理由を出す。
+- **stateSig() に path（enabled + 各点の t/az/el/dist/ease）を必ず混ぜる**。忘れると undo で
+  経路だけ戻ってもビューが追従しない（既存の「署名への混ぜ忘れ」と同じ罠。今回はテスト U.15 で
+  undo → ビュー復元まで固定した）。
+
+### 検証
+
+`test/tests-objpath.js` に 84 項目（グループ `[37]`）: ease の u=0.5 値 / 最短弧 / ホールド /
+最小間隔とクランプ / load の防御 / toJSON 往復 / lock / undo 粒度、書き出しは az +90→-90 の
+全長移動を renderMix して前半 L 優勢・後半 R 優勢を数値検証（等パワー / VBAP のパワー和 /
+width の2ソース追従 / ホールド定常値）、ライブは followPaths を applyObjPosition のスパイで、
+UI はトグル / 追加 / ドラッグ / ease / 削除 / lock / 通常ドラッグ不可まで。940/940 passed。
+`test/bench.js` に OB.11（128個 × 8点 × 300フレームの補間）を追加した。

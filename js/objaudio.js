@@ -64,6 +64,12 @@ DAW.objaudio = {
 
   live: new Map(),   // objId -> ノード一式（ライブ用。オフライン書き出しでは保持しない）
 
+  // 書き出し中のレンダリング範囲 {from, until}（プロジェクト絶対時間）。
+  // wav.js の exportMix がグラフを組む間だけ設定し、終わったら null に戻す。
+  // オフライン ctx での create() がこれを見て経路をランプ列に焼き込む。
+  exportRange: null,
+  PATH_BAKE_DT: 0.02,   // 経路焼き込みのサンプリング間隔（20ms 固定）
+
   // 試聴時だけ HRTF にする（編集中は等パワーで軽く保つ）。CPU 対策なので既定で有効。
   autoHrtf: true,
   editing: false,    // ビューでドラッグ中など、編集操作の最中か
@@ -315,7 +321,100 @@ DAW.objaudio = {
       nodes.points.push(mk(1, az.right));   // R 成分
     }
     nodes.output = nodes.points[0].output;
+    // 書き出し（オフライン ctx）で経路が有効なら、位置の時間変化をランプ列として焼き込む。
+    // ライブは rAF 追従（followPaths）、書き出しはこの焼き込み、と経路の反映方法を分ける
+    // （オフラインレンダリングには rAF が無いため）。
+    if (ctx !== (DAW.audio && DAW.audio.ctx) && this.exportRange
+        && obj.path && obj.path.enabled && obj.path.points.length) {
+      this.bakePath(ctx, nodes, obj, this.exportRange.from, this.exportRange.until);
+    }
     return nodes;
+  },
+
+  // ---- 経路の焼き込み（書き出し用）----
+
+  // サンプリング時刻の列（プロジェクト絶対時間・昇順・重複なし）。
+  // 動いている区間（最初の点〜最後の点）だけ PATH_BAKE_DT 刻み + 各 waypoint 時刻。
+  // 前後のホールド区間は値が変わらないので端の2イベントに省略される（刻みを入れない）。
+  bakeTimes(pts, from, until) {
+    const ts = [from, until];
+    const m0 = Math.max(from, pts[0].t);
+    const m1 = Math.min(until, pts[pts.length - 1].t);
+    // 加算の誤差が積もらないよう k * DT で刻む（waypoint 時刻と紛らわしい端数を出さない）
+    for (let k = 0; ; k++) {
+      const t = m0 + k * this.PATH_BAKE_DT;
+      if (t >= m1 - 1e-9) break;
+      ts.push(t);
+    }
+    for (const p of pts) {
+      if (p.t > from && p.t < until) ts.push(p.t);
+    }
+    ts.sort((a, b) => a - b);
+    const out = [];
+    for (const t of ts) {
+      if (!out.length || t - out[out.length - 1] > 1e-6) out.push(t);
+    }
+    return out;
+  },
+
+  // 経路をオフライン ctx の AudioParam へ setValueAtTime + linearRampToValueAtTime 列で予約する。
+  // 位置の値計算はライブ側と同じ式（toCartesian / panGains / vbapGains / widthAzimuths / widthGain）
+  // を使うので、「聞いた音」と「書き出した音」の定位は一致する。
+  // ctx の時刻 0 = プロジェクト時刻 from（exportMix は from を起点にクリップを並べる）。
+  bakePath(ctx, nodes, obj, from, until) {
+    const pts = obj.path && obj.path.points;
+    if (!pts || !pts.length || !(until > from)) return;
+    const layout = this.layout();
+    // パラメータと「位置 → 値」の対を集める。width ≠ 0 は2点それぞれ（L は az.left、R は az.right）。
+    const params = [];
+    const calc = [];
+    const addPoint = (p, side) => {
+      const azOf = pos => {
+        if (!side) return pos.az;
+        const az = this.widthAzimuths({ az: pos.az, width: obj.width });
+        return side === 'L' ? az.left : az.right;
+      };
+      if (p.src) {   // 2ソースの振幅（widthGain は方位で変わるので一緒に焼く）
+        params.push(p.src.gain);
+        calc.push(pos => this.widthGain({ az: pos.az, el: pos.el, width: obj.width }));
+      }
+      if (p.panner) {
+        if (!p.panner.positionX) return;   // 古い実装（setPosition のみ）は焼き込めず初期位置のまま
+        params.push(p.panner.positionX, p.panner.positionY, p.panner.positionZ);
+        calc.push(
+          pos => this.toCartesian(azOf(pos), pos.el, pos.dist).x,
+          pos => this.toCartesian(azOf(pos), pos.el, pos.dist).y,
+          pos => this.toCartesian(azOf(pos), pos.el, pos.dist).z,
+        );
+      } else if (p.spk) {
+        p.spk.forEach((sg, i) => {
+          params.push(sg.gain);
+          calc.push(pos => this.vbapGains(azOf(pos), pos.el, layout)[i]);
+        });
+      } else if (p.gl) {
+        params.push(p.gl.gain, p.gr.gain);
+        calc.push(
+          pos => this.panGains(azOf(pos), pos.el).l,
+          pos => this.panGains(azOf(pos), pos.el).r,
+        );
+      }
+    };
+    if (nodes.points.length === 1) {
+      addPoint(nodes.points[0], null);
+    } else {
+      addPoint(nodes.points[0], 'L');
+      addPoint(nodes.points[1], 'R');
+    }
+    const times = this.bakeTimes(pts, from, until);
+    for (let i = 0; i < times.length; i++) {
+      const pos = DAW.objects.pathPosAt(obj, times[i]);
+      const ct = Math.max(0, times[i] - from);
+      for (let k = 0; k < params.length; k++) {
+        const v = calc[k](pos);
+        if (i === 0) params[k].setValueAtTime(v, ct);
+        else params[k].linearRampToValueAtTime(v, ct);
+      }
+    }
   },
 
   // PannerNode へ位置を反映する。positionX/Y/Z は AudioParam なので、
@@ -337,6 +436,23 @@ DAW.objaudio = {
     this.live.set(objId, nodes);
   },
 
+  // 位置 pos = {az, el, dist} をノード一式へ反映する。update() から抽出した共通経路で、
+  // update()（パラメータ変更）と followPaths()（経路のライブ追従）が同じここを通る
+  // （書き出しの bakePath も同じ値計算 = widthAzimuths / widthGain / updatePoint の式を使う）。
+  // width ≠ 0 の2ソース分岐（widthAzimuths / widthGain）もここに閉じ込める。
+  applyObjPosition(nodes, obj, pos, t) {
+    if (nodes.points.length === 1) {
+      this.updatePoint(nodes.points[0], pos.az, pos.el, pos.dist, t);
+    } else {
+      const w = { az: pos.az, el: pos.el, width: obj.width };   // widthAzimuths/widthGain は obj 形を読む
+      const az = this.widthAzimuths(w);
+      const k = this.widthGain(w);
+      for (const p of nodes.points) if (p.src) p.src.gain.setTargetAtTime(k, t, 0.02);
+      this.updatePoint(nodes.points[0], az.left, pos.el, pos.dist, t);
+      this.updatePoint(nodes.points[1], az.right, pos.el, pos.dist, t);
+    }
+  },
+
   // オブジェクトのパラメータ変更をライブのノードへ反映する。
   // 位置は setValueAtTime ではなく setTargetAtTime で滑らかに動かす（ドラッグ中のザラつき防止）。
   // width の変更はノード構成そのものが変わるので、グラフを組み直す。
@@ -354,16 +470,25 @@ DAW.objaudio = {
     const ctx = DAW.audio.ctx;
     const t = ctx ? ctx.currentTime : 0;
     n.gain.gain.setTargetAtTime(DAW.objects.effectiveGain(obj), t, 0.01);
-    if (n.points.length === 1) {
-      this.updatePoint(n.points[0], obj.az, obj.el, obj.dist, t);
-    } else {
-      const az = this.widthAzimuths(obj);
-      const k = this.widthGain(obj);
-      for (const p of n.points) if (p.src) p.src.gain.setTargetAtTime(k, t, 0.02);
-      this.updatePoint(n.points[0], az.left, obj.el, obj.dist, t);
-      this.updatePoint(n.points[1], az.right, obj.el, obj.dist, t);
-    }
+    // 経路が有効なら再生ヘッド位置の経路上の点、そうでなければ静的位置（posAt が判断する）
+    this.applyObjPosition(n, obj, DAW.objects.posAt(obj, DAW.audio.getPos()), t);
     n.width = obj.width || 0;
+  },
+
+  // 経路のライブ追従。rAF（objui.tick）から毎フレーム呼ばれ、再生中でなければ何もしない。
+  // setTargetAtTime(0.02s) の滑らかさで追うので、フレーム間の量子化は聴感上ならされる
+  // （ループ折り返し時の 〜20ms のグライドも同じ仕組みによるもので仕様）。
+  followPaths() {
+    if (!DAW.audio.isPlaying()) return;
+    const ctx = DAW.audio.ctx;
+    if (!ctx) return;
+    const pos = DAW.audio.getPos();
+    const t = ctx.currentTime;
+    for (const obj of DAW.objects.list) {
+      if (!obj.path || !obj.path.enabled || !obj.path.points.length) continue;
+      const n = this.live.get(obj.id);
+      if (n) this.applyObjPosition(n, obj, DAW.objects.pathPosAt(obj, pos), t);
+    }
   },
 
   // オブジェクトの現在のピーク（dBFS）。鳴っていない/ノード未生成なら -Infinity。

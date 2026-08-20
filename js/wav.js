@@ -112,15 +112,23 @@ DAW.wav = {
     master.gain.value = DAW.project.masterVolume;
     master.connect(off.destination);
     await DAW.plugins.prepareAll(off, DAW.project.tracks);
-    for (const track of DAW.project.tracks) {
-      const gain = off.createGain();
-      gain.gain.value = DAW.effectiveGain(track);
-      const panner = off.createStereoPanner();
-      panner.pan.value = track.pan;
-      DAW.audio.connectChain(off, track, gain, DAW.audio.trackDest(off, track, panner, master));
-      for (const clip of track.clips) {
-        DAW.audio.scheduleClip(off, gain, clip, from, 0, loop ? loop.end : undefined);
+    // 経路（位置オートメーション）の焼き込み範囲。オフライン ctx での objaudio.create()
+    // （trackDest 経由）がこれを見てランプ列を予約する（trackDest のシグネチャは変えない）。
+    // 例外で抜けてもライブ側に漏れないよう finally で必ず戻す。
+    DAW.objaudio.exportRange = { from, until: to };
+    try {
+      for (const track of DAW.project.tracks) {
+        const gain = off.createGain();
+        gain.gain.value = DAW.effectiveGain(track);
+        const panner = off.createStereoPanner();
+        panner.pan.value = track.pan;
+        DAW.audio.connectChain(off, track, gain, DAW.audio.trackDest(off, track, panner, master));
+        for (const clip of track.clips) {
+          DAW.audio.scheduleClip(off, gain, clip, from, 0, loop ? loop.end : undefined);
+        }
       }
+    } finally {
+      DAW.objaudio.exportRange = null;
     }
     const raw = await off.startRendering();
     // リミッター前のピーク（どれだけ突っ込んでいるかの目安。警告の判定にも使う）

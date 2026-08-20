@@ -34,6 +34,13 @@ DAW.objects = {
     gainDb: [-72, 6],
   },
 
+  // ---- 経路（位置オートメーション） ----
+  // obj.path = { enabled, points: [{ t, az, el, dist, ease }] }
+  //   t    … プロジェクト絶対時間（秒）。昇順を維持し、同時刻は PATH_MIN_DT を強制する
+  //   ease … 「その点から次の点へ向かう」セグメントの緩急
+  PATH_MIN_DT: 0.05,                          // waypoint 同士の最小間隔（秒）
+  EASES: ['linear', 'in', 'out', 'inout'],    // 等速 / 加速 / 減速 / S字
+
   clamp(key, v) {
     const r = this.LIMITS[key];
     const n = +v;
@@ -75,6 +82,7 @@ DAW.objects = {
       name: name || `オブジェクト ${this.list.length + 1}`,
       color: this.COLORS[this.list.length % this.COLORS.length],
       trackId: trackId || null,
+      path: { enabled: false, points: [] },   // 経路（位置オートメーション）
     }, this.defaults());
     this.list.push(obj);
     return obj;
@@ -113,6 +121,151 @@ DAW.objects = {
 
   changed(obj) {
     if (this.onChange) this.onChange(obj);
+  },
+
+  // ---- 経路の補間 ----
+
+  // 手で組んだ古いオブジェクトでも落ちないように、path が無ければここで補う
+  ensurePath(obj) {
+    if (!obj.path || typeof obj.path !== 'object' || !Array.isArray(obj.path.points)) {
+      obj.path = { enabled: false, points: [] };
+    }
+    return obj.path;
+  },
+
+  // イージング。u は 0〜1、戻りも 0〜1。'in'=加速 / 'out'=減速 / 'inout'=S字
+  easeVal(ease, u) {
+    if (ease === 'in') return u * u;
+    if (ease === 'out') return u * (2 - u);
+    if (ease === 'inout') return u * u * (3 - 2 * u);
+    return u;   // linear
+  },
+
+  // 方位の補間。±180 の折り畳みをまたいでも最短弧を通る（+170 → -170 は 180 経由の 20°）。
+  // 補間はモデル層のここ一箇所（描画のサンプリングも書き出しの焼き込みもこれを使う）。
+  azLerp(a, b, u) {
+    let d = ((b - a) % 360 + 360) % 360;    // [0, 360)
+    if (d > 180) d -= 360;                  // (-180, 180]
+    let az = a + d * u;
+    az = ((az % 360) + 360) % 360;
+    if (az > 180) az -= 360;
+    return az;
+  },
+
+  // セグメント内の位置（u は緩急適用後の 0〜1）。az は最短弧、el/dist は線形。
+  pathSegPos(p0, p1, u) {
+    return {
+      az: this.azLerp(p0.az, p1.az, u),
+      el: p0.el + (p1.el - p0.el) * u,
+      dist: p0.dist + (p1.dist - p0.dist) * u,
+    };
+  },
+
+  // 経路上の時刻 t（プロジェクト絶対時間）の位置。
+  // 最初の点より前・最後の点より後はホールド（端の位置に留まる）。
+  pathPosAt(obj, t) {
+    const pts = obj.path ? obj.path.points : [];
+    if (!pts.length) return { az: obj.az, el: obj.el, dist: obj.dist };
+    if (t <= pts[0].t) return { az: pts[0].az, el: pts[0].el, dist: pts[0].dist };
+    const last = pts[pts.length - 1];
+    if (t >= last.t) return { az: last.az, el: last.el, dist: last.dist };
+    let i = 0;
+    while (i < pts.length - 2 && pts[i + 1].t <= t) i++;
+    const a = pts[i];
+    const b = pts[i + 1];
+    const u = (t - a.t) / (b.t - a.t);
+    return this.pathSegPos(a, b, this.easeVal(a.ease, u));
+  },
+
+  // 時刻 t の実効位置。経路が有効で点があれば経路、そうでなければ静的 az/el/dist。
+  // 静的フィールドは消さない（旧プロジェクトの意味論を保つ）。
+  posAt(obj, t) {
+    if (obj.path && obj.path.enabled && obj.path.points.length) return this.pathPosAt(obj, t);
+    return { az: obj.az, el: obj.el, dist: obj.dist };
+  },
+
+  // ---- 経路の編集（すべて normalize/clamp/changed を通し、lock は位置編集と同じ扱い）----
+
+  // waypoint を追加して返す（lock などで追加できなければ null）。
+  // 既存の点と近すぎる時刻は PATH_MIN_DT ぶん後ろへ押し出す（昇順で走査するので1パスで済む）。
+  addPathPoint(id, pt) {
+    const obj = this.get(id);
+    if (!this.canEditPosition(obj)) return null;
+    const pts = this.ensurePath(obj).points;
+    const q = pt || {};
+    const n = this.normalize(q.az != null ? q.az : obj.az, q.el != null ? q.el : obj.el);
+    let t = Math.max(0, isFinite(+q.t) ? +q.t : 0);
+    for (const p of pts) if (Math.abs(p.t - t) < this.PATH_MIN_DT - 1e-9) t = p.t + this.PATH_MIN_DT;
+    const point = {
+      t,
+      az: n.az,
+      el: n.el,
+      dist: this.clamp('dist', q.dist != null ? q.dist : obj.dist),
+      ease: this.EASES.includes(q.ease) ? q.ease : 'linear',
+    };
+    let i = 0;
+    while (i < pts.length && pts[i].t <= point.t) i++;
+    pts.splice(i, 0, point);
+    this.changed(obj);
+    return point;
+  },
+
+  // waypoint の位置を更新（null の引数は据え置き）。時刻は setPathPointTime の担当。
+  movePathPoint(id, index, az, el, dist) {
+    const obj = this.get(id);
+    if (!this.canEditPosition(obj)) return false;
+    const p = obj.path && obj.path.points[index];
+    if (!p) return false;
+    const n = this.normalize(az != null ? az : p.az, el != null ? el : p.el);
+    p.az = n.az;
+    p.el = n.el;
+    if (dist != null) p.dist = this.clamp('dist', dist);
+    this.changed(obj);
+    return true;
+  },
+
+  // waypoint の時刻を変更。前後の点 ±PATH_MIN_DT でクランプする（順序は入れ替わらない）。
+  setPathPointTime(id, index, t) {
+    const obj = this.get(id);
+    if (!this.canEditPosition(obj)) return false;
+    const pts = obj.path && obj.path.points;
+    const p = pts && pts[index];
+    if (!p) return false;
+    const v = isFinite(+t) ? +t : p.t;
+    const lo = index > 0 ? pts[index - 1].t + this.PATH_MIN_DT : 0;
+    const hi = index < pts.length - 1 ? pts[index + 1].t - this.PATH_MIN_DT : Infinity;
+    p.t = Math.min(hi, Math.max(lo, v));
+    this.changed(obj);
+    return true;
+  },
+
+  removePathPoint(id, index) {
+    const obj = this.get(id);
+    if (!this.canEditPosition(obj)) return false;
+    const pts = obj.path && obj.path.points;
+    if (!pts || index < 0 || index >= pts.length) return false;
+    pts.splice(index, 1);
+    this.changed(obj);
+    return true;
+  },
+
+  // セグメントの緩急を循環させる（linear → in → out → inout → linear）
+  cyclePathEase(id, index) {
+    const obj = this.get(id);
+    if (!this.canEditPosition(obj)) return false;
+    const p = obj.path && obj.path.points[index];
+    if (!p) return false;
+    p.ease = this.EASES[(this.EASES.indexOf(p.ease) + 1) % this.EASES.length];
+    this.changed(obj);
+    return true;
+  },
+
+  setPathEnabled(id, on) {
+    const obj = this.get(id);
+    if (!this.canEditPosition(obj)) return false;
+    this.ensurePath(obj).enabled = !!on;
+    this.changed(obj);
+    return true;
   },
 
   // az/el/dist/width/gainDb などの数値パラメータをまとめて更新する。
@@ -187,7 +340,34 @@ DAW.objects = {
       id: o.id, name: o.name, color: o.color, trackId: o.trackId || null,
       az: o.az, el: o.el, dist: o.dist, width: o.width,
       gainDb: o.gainDb, mute: !!o.mute, solo: !!o.solo, lock: o.lock,
+      path: {
+        enabled: !!(o.path && o.path.enabled),
+        points: (o.path ? o.path.points : []).map(p => ({ t: p.t, az: p.az, el: p.el, dist: p.dist, ease: p.ease })),
+      },
     }));
+  },
+
+  // 経路の読み込み。欠落は { enabled:false, points:[] }、不正な ease は 'linear'、
+  // t は昇順に並べ直し、同時刻（PATH_MIN_DT 未満）は後の点を押し出して間隔を守る。
+  loadPath(src) {
+    const p = src && typeof src === 'object' ? src : {};
+    const pts = (Array.isArray(p.points) ? p.points : [])
+      .map(q => {
+        const s = q && typeof q === 'object' ? q : {};
+        const n = this.normalize(s.az != null ? s.az : 0, s.el != null ? s.el : 0);
+        return {
+          t: Math.max(0, isFinite(+s.t) ? +s.t : 0),
+          az: n.az,
+          el: n.el,
+          dist: this.clamp('dist', s.dist != null ? s.dist : 1),
+          ease: this.EASES.includes(s.ease) ? s.ease : 'linear',
+        };
+      })
+      .sort((a, b) => a.t - b.t);
+    for (let i = 1; i < pts.length; i++) {
+      if (pts[i].t < pts[i - 1].t + this.PATH_MIN_DT) pts[i].t = pts[i - 1].t + this.PATH_MIN_DT;
+    }
+    return { enabled: !!p.enabled, points: pts };
   },
 
   // 読み込み。旧プロジェクト（objects を持たない）は空配列で開く。
@@ -210,6 +390,7 @@ DAW.objects = {
         mute: !!src.mute,
         solo: !!src.solo,
         lock: ['none', 'pos', 'all'].includes(src.lock) ? src.lock : 'none',
+        path: this.loadPath(src.path),   // 旧プロジェクトは path を持たないので空で開く
       };
     });
     // 同じトラックを指す重複割り当ては先勝ちで解消する（手で編集されたファイル対策）。

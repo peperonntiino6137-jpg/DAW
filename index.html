@@ -114,6 +114,11 @@
     <div id="obj-panner" class="obj-view">
       <div id="obj-topview">
         <div class="obj-view-label">TOP VIEW</div>
+        <!-- 経路（位置オートメーション）。有効切替と編集モード。状態同期は js/objui.js -->
+        <div id="obj-path-tools">
+          <button id="obj-path-enable" title="選択中のオブジェクトの経路（位置オートメーション）を有効/無効にする">経路</button>
+          <button id="obj-path-edit" title="経路の編集モード（空きクリック=点を追加 / 点をドラッグ=移動 / 右クリック=削除 / セグメント中点=緩急の切替 / 時間チップを左右ドラッグ=時刻）">編集</button>
+        </div>
         <canvas id="obj-top" title="クリック・ドラッグで選択中のオブジェクトを動かす"></canvas>
       </div>
       <!-- 正面ビュー。リスナーを背後から見る（3D球ビューと同じ向き）。横=左右、縦=高さ。 -->
