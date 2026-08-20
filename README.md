@@ -115,7 +115,7 @@ DAW.plugins.register({
 });
 ```
 
-エフェクトはトラックごとに「Gain →（FXチェーン）→ Pan」の位置に直列で挿入され、WAV 書き出しにも反映される。同梱プラグイン: `lowpass.js`（ローパス）、`delay.js`（ディレイ）、`eq.js`（7バンド グラフィックEQ）、`dyneq.js`（3バンド パラメトリック/ダイナミックEQ）、`comp.js`（コンプレッサー）、`reverb.js`（リバーブ）。
+エフェクトはトラックごとに「Gain →（FXチェーン）→ Pan」の位置に直列で挿入され、WAV 書き出しにも反映される。同梱プラグイン: `lowpass.js`（ローパス）、`delay.js`（ディレイ）、`eq.js`（7バンド グラフィックEQ）、`dyneq.js`（3バンド パラメトリック/ダイナミックEQ）、`comp.js`（コンプレッサー）、`reverb.js`（リバーブ）、`multiband.js`（3バンド マルチバンドコンプ）、`goodizer.js`（1ノブ・エンハンサー）。
 
 AudioWorklet など非同期初期化が必要なプラグインは、オプションの `prepare(ctx)`（Promise を返す）を定義できる。core が再生・書き出し・読み込み・FX追加の前に await してから `create()` を呼ぶ。実装例は `dyneq.js` を参照（Worklet モジュールを Blob URL でロードするので file:// でも動く）。
 
