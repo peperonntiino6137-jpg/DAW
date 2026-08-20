@@ -266,3 +266,26 @@ regressSuite('[R5] 録音の頭出し', async (okf) => {
     Math.abs(clip.duration - (DAW.buffers.get(clip.bufferId).duration - clip.offset)) < 1e-6,
     `duration=${clip.duration.toFixed(3)} buffer=${DAW.buffers.get(clip.bufferId).duration.toFixed(3)}`);
 });
+
+// ループ終端がプロジェクト終端を越えても再生が止まらないこと(QA スイープで発見)。
+// ui.tick() の自動停止が activeLoop を考慮していなかった回帰の固定。
+T('[R] ループ終端>プロジェクト終端で自動停止しない', async () => {
+  DAW.audio.stop();
+  DAW.project.tracks = [];
+  const tr = DAW.addTrack('ループ');
+  const ctx = DAW.audio.ensureCtx();
+  const b = ctx.createBuffer(2, ctx.sampleRate * 2, ctx.sampleRate);
+  tr.clips.push({ id: DAW.uid(), bufferId: DAW.registerBuffer(b), startTime: 0, offset: 0, duration: 2, name: 'c' });
+  DAW.setLoop(1.5, 4.0);
+  DAW.loop.enabled = true;
+  await DAW.audio.play();
+  // 終端(2.0s)相当の位置で tick を直接呼んでも playing のままであること
+  DAW.audio.playStartCtxTime = ctx.currentTime - 2.5;   // pos ≒ 4.0 相当まで進める
+  DAW.ui.tick();
+  const stillPlaying = DAW.audio.playing;
+  DAW.audio.stop();
+  DAW.loop.enabled = false;
+  DAW.project.tracks = [];
+  if (!stillPlaying) throw new Error('ループ中に自動停止した');
+  return 'ループ継続を確認';
+});

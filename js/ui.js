@@ -1367,7 +1367,9 @@ DAW.ui = {
     this.els.time.textContent = this.fmtTime(shown);
     if (DAW.audio.playing) {
       const dur = DAW.projectDuration();
-      if (dur > 0 && pos >= dur) {
+      // ループ中は終端で止めない（ループ区間がプロジェクト終端を越えていても
+      // エンジン側は繰り返しを予約済み。ここで pause すると先回りで殺してしまう）
+      if (dur > 0 && pos >= dur && !DAW.activeLoop()) {
         DAW.audio.pause();
         this.updatePlayButton();
       }
