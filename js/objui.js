@@ -45,6 +45,14 @@ DAW.objui = {
     { key: 'lookaheadMs', label: 'Look', unit: 'ms', digits: 1, def: 5 },
   ],
 
+  // ---- ルームリバーブのノブ（RENDERER）----
+  // 値の正は DAW.objaudio.revParams。既定はレンダラー層（REV_DEFAULTS）と揃えること。
+  REV_KNOBS: [
+    { key: 'decay', label: 'Decay', unit: 's', digits: 1, def: 1.8, jp: '残響長' },
+    { key: 'damp', label: 'Bright', unit: '', digits: 2, def: 0.5, jp: '明るさ' },
+    { key: 'level', label: 'Return', unit: '', digits: 2, def: 0, jp: 'リターン量' },
+  ],
+
   // スピーカー配置（ADM 準拠の az/el）。正はレンダラー側 DAW.objaudio.LAYOUTS。
   // ここに持つのは「まだ objaudio が配置を持っていない場合」のための控えで、
   // 両方あるときは必ずレンダラー側を使う（定義が二重にならないようにする）。
@@ -114,6 +122,7 @@ DAW.objui = {
       layouts: $('obj-layouts'),
       spkList: $('obj-spk-list'),
       knobs: $('obj-knobs'),
+      revKnobs: $('obj-rev-knobs'),
       limByp: $('obj-lim-byp'),
       out: $('obj-out'),
     };
@@ -1431,6 +1440,27 @@ DAW.objui = {
       this.buildNumBox(id, 'width', 'Wd', 5),
     );
 
+    // Rev センド（ルームリバーブへ送る量）。共通ノブに乗せる。
+    // undo は commit 1回（ドラッグ全体 / ホイール1操作で1エントリ。revSend は履歴の
+    // スナップショット（objects.toJSON）に入っているので commit だけでよい）。
+    const rev = document.createElement('div');
+    rev.className = 'os-rev';
+    const revLab = document.createElement('span');
+    revLab.textContent = 'Rev';
+    const revKnob = DAW.knob.create({
+      label: 'Rev センド',
+      size: 22,
+      range: { min: DAW.objects.LIMITS.revSend[0], max: DAW.objects.LIMITS.revSend[1], step: 0.01 },
+      def: 0.25,
+      get: () => { const o = DAW.objects.get(id); return o ? o.revSend : 0.25; },
+      set: v => DAW.objects.set(id, 'revSend', v),   // lock='all' はモデル側が拒否する
+      commit: () => { this.render(); DAW.history.commit(); },
+      format: v => Math.round(v * 100) + '%',
+      active: () => DAW.objects.canEditParams(DAW.objects.get(id)),
+    });
+    rev.title = 'ルームリバーブへのセンド量。実効量は距離と連動する（遠いほど湿る）';
+    rev.append(revLab, revKnob);
+
     // Lock（none → pos → all → none）
     const lock = document.createElement('button');
     lock.className = 'os-lock';
@@ -1489,11 +1519,11 @@ DAW.objui = {
     });
     ms.append(mute, solo);
 
-    el.append(head, track, nums, lock, peak, fader, gain, ms);
+    el.append(head, track, nums, rev, lock, peak, fader, gain, ms);
     // 子要素の参照を控えておく（syncStrip はドラッグ中に毎フレーム走るので、
     // そのたびに querySelector を10回叩かない。js/ui.js の el._clip と同じ発想）。
     el._r = {
-      dot, name, track, lock, peak, fader, gain, mute, solo,
+      dot, name, track, lock, peak, fader, gain, mute, solo, revKnob,
       az: nums.querySelector('.os-in-az'),
       el: nums.querySelector('.os-in-el'),
       width: nums.querySelector('.os-in-width'),
@@ -1591,6 +1621,8 @@ DAW.objui = {
     r.lock.textContent = obj.lock === 'none' ? '自由' : obj.lock === 'pos' ? '位置固定' : '全固定';
     r.lock.className = 'os-lock lock-' + obj.lock;
     r.lock.title = `ロック: ${obj.lock}（クリックで none → pos → all）`;
+
+    r.revKnob.update();   // 外部変更（undo / 読み込み）に追従。lock='all' は灰色になる（active）
 
     const editable = DAW.objects.canEditParams(obj);
     if (r.fader !== act) r.fader.value = obj.gainDb;
@@ -1772,6 +1804,7 @@ DAW.objui = {
       e.layouts.appendChild(b);
     }
     for (const spec of this.KNOBS) e.knobs.appendChild(this.buildKnob(spec));
+    if (e.revKnobs) for (const spec of this.REV_KNOBS) e.revKnobs.appendChild(this.buildRevKnob(spec));
     e.limByp.addEventListener('click', () => {
       DAW.limiter.setEnabled(!DAW.limiter.enabled);
       this.renderRenderer();
@@ -1798,6 +1831,29 @@ DAW.objui = {
     el.classList.add('obj-knob');
     el.dataset.key = spec.key;
     el.title = `${spec.label}（${r[0]}〜${r[1]}${spec.unit}）: 上下ドラッグで変更 / Ctrl か Shift で微調整 / ダブルクリックで既定値`;
+    this.knobs.set(spec.key, el);
+    return el;
+  },
+
+  // ルームリバーブのノブ。作法はリミッターのノブ（buildKnob）と同じ。
+  // Return（level）が 0 のとき全ノブを灰色で描き、「オフ」を見た目でも示す。
+  buildRevKnob(spec) {
+    const r = DAW.objaudio.REV_LIMITS[spec.key];
+    const el = DAW.knob.create({
+      label: spec.label,
+      range: { min: r[0], max: r[1] },   // step 無し = 連続値
+      def: spec.def,
+      get: () => DAW.objaudio.revParams[spec.key],
+      set: v => { DAW.objaudio.setRevParam(spec.key, v); this.renderRenderer(); },
+      // リミッターと同じく履歴のスナップショット外（保存はプロジェクト保存 roomReverb が担う）。
+      // 履歴に入るようになったらここで DAW.history.commit() を呼ぶ。
+      commit: () => {},
+      format: v => v.toFixed(spec.digits) + spec.unit,
+      active: () => DAW.objaudio.revParams.level > 0,
+    });
+    el.classList.add('obj-knob');
+    el.dataset.key = spec.key;
+    el.title = `${spec.jp}（${r[0]}〜${r[1]}${spec.unit}）: 上下ドラッグで変更 / Ctrl か Shift で微調整 / ダブルクリックで既定値`;
     this.knobs.set(spec.key, el);
     return el;
   },
@@ -1855,6 +1911,7 @@ DAW.objui = {
       mixStr(String(o.trackId));   // 割り当ての undo / 奪い取りの巻き添えにセレクタが追従する
       mix(o.az * 1000); mix(o.el * 1000); mix(o.dist * 10000);
       mix(o.width * 100); mix(o.gainDb * 100);
+      mix(o.revSend * 1000);   // Rev センド。混ぜ忘れると undo 後にノブが追従しない
       mix((o.mute ? 1 : 0) | (o.solo ? 2 : 0) | (o.lock === 'pos' ? 4 : o.lock === 'all' ? 8 : 0));
       // 経路（有効フラグ + 各点の t/az/el/dist/ease）。混ぜ忘れると undo 後にビューが追従しない
       const path = o.path || { enabled: false, points: [] };
@@ -1880,6 +1937,9 @@ DAW.objui = {
     const lp = DAW.limiter.params;
     mix(lp.gainDb * 100); mix(lp.releaseMs * 10); mix(lp.ceilingDb * 100); mix(lp.lookaheadMs * 100);
     mix(DAW.limiter.enabled ? 1 : 0);
+    // ルームリバーブのマスターパラメータ（プロジェクト読み込み等の外部変更にノブが追従する）
+    const rp = (DAW.objaudio && DAW.objaudio.revParams) || {};
+    mix(rp.decay * 100); mix(rp.damp * 1000); mix(rp.level * 1000);
     return String(h >>> 0);
   },
 

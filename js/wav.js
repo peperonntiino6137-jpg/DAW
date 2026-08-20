@@ -171,6 +171,8 @@ DAW.wav = {
       bpm: DAW.project.bpm,
       loop: { enabled: DAW.loop.enabled, start: DAW.loop.start, end: DAW.loop.end },
       objects: DAW.objects.toJSON(),
+      // ルームリバーブのマスターパラメータ（RENDERER）。追加フィールドのみなので version:1 のまま互換
+      roomReverb: Object.assign({}, DAW.objaudio.revParams),
       tracks: DAW.project.tracks,
       buffers,
     };
@@ -222,6 +224,7 @@ DAW.wav = {
       tracks: data.tracks,
     };
     DAW.objects.load(data.objects);   // 旧プロジェクトは objects を持たないので空になる
+    DAW.objaudio.loadRevParams(data.roomReverb);   // 欠落は既定値（level=0 = 従来の音）で補完
     const loop = data.loop || {};
     DAW.loop.enabled = !!loop.enabled;
     DAW.loop.start = +loop.start || 0;

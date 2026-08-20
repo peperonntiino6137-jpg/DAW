@@ -74,6 +74,134 @@ DAW.objaudio = {
   autoHrtf: true,
   editing: false,    // ビューでドラッグ中など、編集操作の最中か
 
+  // ---- ルームリバーブ（オブジェクト共有のセンドバス）----
+  //
+  // 各オブジェクトの「ゲイン後・定位前」の点から sendGain で1本のバスへ集約し、
+  // ConvolverNode（生成 IR）を通してオブジェクトミックスと同じ出力（マスター、
+  // リミッター前）へ合流させる。トラック FX のリバーブ（インサート）とは独立の空間側の機構。
+  //
+  // 実効センド量は距離と連動させ、「遠くのオブジェクトほど残響が多い」＝距離が耳で分かるようにする:
+  //   実効センド量 = revSend × (0.25 + 0.75 × dist)
+  // 式はここ（revSendLevel）に1箇所だけ持つ。ライブ（followPaths / update）も
+  // 書き出し（bakePath のランプ焼き込み）も必ずこれを通す。
+  //
+  // level=0（リターン無し）や revSend=0 のときは無音（正確な 0.0）を足すだけなので、
+  // 既存の音とサンプル一致する（回帰の要。既定 level=0 で旧プロジェクトの音を変えない）。
+  REV_LIMITS: {
+    decay: [0.2, 6],     // 残響長（秒）
+    damp: [0.05, 1],     // 明るさ（1 = 明るい。IR のノイズへ掛ける1次ローパスの係数）
+    level: [0, 1],       // リターン量（0 = リバーブなし = 既存の音と完全一致）
+  },
+  REV_DEFAULTS: { decay: 1.8, damp: 0.5, level: 0 },
+  revParams: { decay: 1.8, damp: 0.5, level: 0 },
+  _revBuses: new WeakMap(),   // ctx -> バス一式（ライブ/オフラインの ctx ごとに1つ）
+
+  // 実効センド量（この式が距離連動の定義。ここ以外に持たない）
+  revSendLevel(obj, dist) {
+    const d = Math.max(0, Math.min(1, dist == null ? obj.dist : dist));
+    return (obj.revSend || 0) * (0.25 + 0.75 * d);
+  },
+
+  // ルームリバーブのインパルス応答。js/plugins/reverb.js と同じく固定シードの
+  // 線形合同法ノイズから作る（Math.random だと再生と書き出しで残響が変わってしまう）。
+  // damp（明るさ）は1次ローパス y += a(x - y) の係数 a。小さいほど高域が落ちて暗くなる。
+  // 減衰エンベロープは (1 - i/len)^2.5 で固定（長さは decay が受け持つ）。
+  revImpulse(ctx, decay, damp) {
+    const len = Math.max(1, Math.floor(ctx.sampleRate * decay));
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    let seed = 20260820;
+    const rnd = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;   // 線形合同法
+      return seed / 0x100000000 * 2 - 1;
+    };
+    const a = Math.max(0.01, Math.min(1, damp));
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      let y = 0;
+      for (let i = 0; i < len; i++) {
+        y += a * (rnd() - y);                       // 明るさ（1次ローパス）
+        d[i] = y * Math.pow(1 - i / len, 2.5);      // 減衰エンベロープ
+      }
+    }
+    return buf;
+  },
+
+  // ctx ごとの共有バスを（無ければ作って）返す。dest はオブジェクトミックスと同じ出力先。
+  // バイノーラル/等パワーではステレオのまま合流し、スピーカー（VBAP）では
+  // リバーブ L → 左側スピーカー群（az>0・LFE除く）、R → 右側（az<0）へ 1/√n で等分配する
+  // （C と LFE には送らない。チャンネル数は配置と一致する）。
+  ensureRevBus(ctx, dest) {
+    let bus = this._revBuses.get(ctx);
+    if (bus) return bus;
+    const input = ctx.createGain();
+    const conv = ctx.createConvolver();
+    conv.normalize = true;
+    conv.buffer = this.revImpulse(ctx, this.revParams.decay, this.revParams.damp);
+    const wet = ctx.createGain();
+    wet.gain.value = this.revParams.level;
+    input.connect(conv);
+    conv.connect(wet);
+    const nodes = [input, conv, wet];
+    if (this.mode === this.MODE_SPEAKERS) {
+      const layout = this.layout();
+      const split = ctx.createChannelSplitter(2);
+      wet.connect(split);
+      const merger = ctx.createChannelMerger(layout.length);
+      const sides = [[], []];   // [左（az>0）, 右（az<0）] のチャンネル番号
+      layout.forEach((s, i) => { if (!s.lfe && s.az !== 0) sides[s.az > 0 ? 0 : 1].push(i); });
+      for (let side = 0; side < 2; side++) {
+        const k = sides[side].length ? 1 / Math.sqrt(sides[side].length) : 0;
+        for (const i of sides[side]) {
+          const g = ctx.createGain();
+          g.gain.value = k;
+          split.connect(g, side);   // ch0 = リバーブ L → 左側、ch1 = R → 右側
+          g.connect(merger, 0, i);
+          nodes.push(g);
+        }
+      }
+      merger.connect(dest);
+      nodes.push(split, merger);
+    } else {
+      wet.connect(dest);   // ステレオのまま合流
+    }
+    bus = { input, conv, wet, nodes };
+    this._revBuses.set(ctx, bus);
+    return bus;
+  },
+
+  // マスターパラメータの変更（RENDERER のノブから）。level は即時、
+  // decay / damp は IR の作り直しが要る（js/plugins/reverb.js の set と同じ作法）。
+  setRevParam(key, value) {
+    const r = this.REV_LIMITS[key];
+    if (!r) return false;
+    const n = +value;
+    this.revParams[key] = Math.max(r[0], Math.min(r[1], isFinite(n) ? n : this.REV_DEFAULTS[key]));
+    const ctx = DAW.audio && DAW.audio.ctx;
+    const bus = ctx && this._revBuses.get(ctx);
+    if (bus) {
+      if (key === 'level') bus.wet.gain.setTargetAtTime(this.revParams.level, ctx.currentTime, 0.01);
+      else bus.conv.buffer = this.revImpulse(ctx, this.revParams.decay, this.revParams.damp);
+    }
+    return true;
+  },
+
+  // プロジェクト読み込み用。欠落は既定値で補完する（旧プロジェクトは level=0 で音が変わらない）
+  loadRevParams(src) {
+    const s = src && typeof src === 'object' ? src : {};
+    for (const key of Object.keys(this.REV_LIMITS)) {
+      this.setRevParam(key, s[key] != null ? s[key] : this.REV_DEFAULTS[key]);
+    }
+  },
+
+  // ライブのバスを切り離して捨てる（reset から呼ぶ。オフライン ctx は丸ごと破棄されるので不要）
+  resetRevBus() {
+    const ctx = DAW.audio && DAW.audio.ctx;
+    const bus = ctx && this._revBuses.get(ctx);
+    if (!bus) return;
+    for (const nd of bus.nodes) { try { nd.disconnect(); } catch (e) {} }
+    this._revBuses.delete(ctx);
+  },
+
   // トラックに割り当てられたオブジェクト（未割り当てなら null）
   forTrack(trackId) {
     if (!trackId) return null;
@@ -279,7 +407,17 @@ DAW.objaudio = {
     gain.gain.value = DAW.objects.effectiveGain(obj);
     input.connect(gain);
 
-    const nodes = { input, gain, points: [], output: null, mode: this.mode, analyser: null, width: obj.width || 0 };
+    const nodes = { input, gain, points: [], output: null, mode: this.mode, analyser: null, width: obj.width || 0, rev: null };
+    // ルームリバーブのセンド。ゲイン後・定位前の点から共有バスへ送る。
+    // 実効量（revSendLevel）は距離連動。経路で dist が動く場合、ライブは
+    // applyObjPosition（update / followPaths）、書き出しは bakePath が追従させる。
+    {
+      const rev = ctx.createGain();
+      rev.gain.value = this.revSendLevel(obj, obj.dist);
+      gain.connect(rev);
+      rev.connect(this.ensureRevBus(ctx, dest).input);
+      nodes.rev = rev;
+    }
     // ライブのときだけメーター用の分岐を作る（書き出しでは不要な負荷）。
     // 128個ぶん常時読むと重いので、読むのは可視ストリップだけ（peakDb() を呼んだときに計測する）。
     if (ctx === DAW.audio.ctx) {
@@ -405,6 +543,11 @@ DAW.objaudio = {
       addPoint(nodes.points[0], 'L');
       addPoint(nodes.points[1], 'R');
     }
+    // ルームリバーブのセンドも距離連動なので、経路の dist の動きを一緒に焼き込む
+    if (nodes.rev) {
+      params.push(nodes.rev.gain);
+      calc.push(pos => this.revSendLevel(obj, pos.dist));
+    }
     const times = this.bakeTimes(pts, from, until);
     for (let i = 0; i < times.length; i++) {
       const pos = DAW.objects.pathPosAt(obj, times[i]);
@@ -441,6 +584,8 @@ DAW.objaudio = {
   // （書き出しの bakePath も同じ値計算 = widthAzimuths / widthGain / updatePoint の式を使う）。
   // width ≠ 0 の2ソース分岐（widthAzimuths / widthGain）もここに閉じ込める。
   applyObjPosition(nodes, obj, pos, t) {
+    // ルームリバーブのセンドは距離連動（revSendLevel）。位置と同じ滑らかさで追従させる
+    if (nodes.rev) nodes.rev.gain.setTargetAtTime(this.revSendLevel(obj, pos.dist), t, 0.02);
     if (nodes.points.length === 1) {
       this.updatePoint(nodes.points[0], pos.az, pos.el, pos.dist, t);
     } else {
@@ -563,6 +708,7 @@ DAW.objaudio = {
       kill(n.input);
       kill(n.gain);
       kill(n.analyser);
+      kill(n.rev);
       for (const p of n.points || []) {
         kill(p.src);
         kill(p.panner);
@@ -573,6 +719,7 @@ DAW.objaudio = {
       }
     }
     this.live.clear();
+    this.resetRevBus();   // 共有バスも切り離す（残すとマスターに繋がったまま積み上がる）
   },
 };
 

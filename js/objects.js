@@ -32,6 +32,7 @@ DAW.objects = {
     dist: [0, 1],
     width: [-200, 200],
     gainDb: [-72, 6],
+    revSend: [0, 1],   // ルームリバーブへのセンド量（実効量は距離と連動。式は objaudio）
   },
 
   // ---- 経路（位置オートメーション） ----
@@ -49,7 +50,7 @@ DAW.objects = {
   },
 
   defaults() {
-    return { az: 0, el: 0, dist: 1, width: 0, gainDb: 0, mute: false, solo: false, lock: 'none' };
+    return { az: 0, el: 0, dist: 1, width: 0, gainDb: 0, revSend: 0.25, mute: false, solo: false, lock: 'none' };
   },
 
   // 極座標の正規化。az は (-180, 180] に畳み、|el| > 90 は裏側へ折り返す。
@@ -339,7 +340,7 @@ DAW.objects = {
     return this.list.map(o => ({
       id: o.id, name: o.name, color: o.color, trackId: o.trackId || null,
       az: o.az, el: o.el, dist: o.dist, width: o.width,
-      gainDb: o.gainDb, mute: !!o.mute, solo: !!o.solo, lock: o.lock,
+      gainDb: o.gainDb, revSend: o.revSend, mute: !!o.mute, solo: !!o.solo, lock: o.lock,
       path: {
         enabled: !!(o.path && o.path.enabled),
         points: (o.path ? o.path.points : []).map(p => ({ t: p.t, az: p.az, el: p.el, dist: p.dist, ease: p.ease })),
@@ -387,6 +388,7 @@ DAW.objects = {
         dist: this.clamp('dist', src.dist != null ? src.dist : d.dist),
         width: this.clamp('width', src.width != null ? src.width : d.width),
         gainDb: this.clamp('gainDb', src.gainDb != null ? src.gainDb : d.gainDb),
+        revSend: this.clamp('revSend', src.revSend != null ? src.revSend : d.revSend),   // 旧プロジェクトは既定で補完
         mute: !!src.mute,
         solo: !!src.solo,
         lock: ['none', 'pos', 'all'].includes(src.lock) ? src.lock : 'none',
