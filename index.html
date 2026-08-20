@@ -18,6 +18,12 @@
     </label>
     <button id="btn-undo" title="元に戻す (Ctrl+Z)" disabled>↶</button>
     <button id="btn-redo" title="やり直す (Ctrl+Shift+Z)" disabled>↷</button>
+    <!-- クリップ編集（選択中のみ有効）。右クリックメニューと同じ経路を呼ぶ -->
+    <div class="edit-group">
+      <button id="btn-cut" title="選択クリップをカット (Ctrl+X)" disabled>カット</button>
+      <button id="btn-split" title="選択クリップを再生ヘッド位置で分割 (S)" disabled>分割</button>
+      <button id="btn-clip-del" title="選択クリップを削除 (Delete)" disabled>削除</button>
+    </div>
     <div id="meter" title="マスター出力レベル（クリックでクリップ表示をリセット）">
       <div class="m-bars">
         <div class="m-bar"><i id="meter-l"></i></div>

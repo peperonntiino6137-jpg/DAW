@@ -70,6 +70,10 @@ input[type="range"] { accent-color: var(--accent); }
 .master-label input { width: 110px; }
 .spacer { flex: 1; }
 
+/* クリップ編集ボタン（カット/分割/削除）。ズーム群と同じ小ぶりの見た目 */
+.edit-group { display: flex; align-items: center; gap: 4px; }
+.edit-group button { padding: 4px 8px; font-size: 12px; }
+
 #meter {
   display: flex;
   align-items: center;
@@ -260,6 +264,36 @@ input[type="range"] { accent-color: var(--accent); }
 #fx-panel .fx-param span.val { min-width: 44px; text-align: right; font-family: Consolas, monospace; }
 #fx-panel .fx-param input { flex: 1; min-width: 0; }
 #fx-panel .fx-remove { align-self: flex-end; font-size: 11px; padding: 2px 8px; }
+
+/* 右クリックメニュー。ストリップ（z:5〜6）や FX パネル（z:20）より手前 */
+#ctx-menu {
+  position: fixed;
+  z-index: 30;
+  min-width: 180px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+#ctx-menu .ctx-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  text-align: left;
+}
+#ctx-menu .ctx-item:hover:not(:disabled) { background: var(--accent); color: #fff; }
+#ctx-menu .ctx-item:disabled { opacity: 0.4; }
+#ctx-menu .ctx-key { font-family: Consolas, monospace; font-size: 10px; color: var(--dim); }
+#ctx-menu .ctx-item:hover:not(:disabled) .ctx-key { color: rgba(255, 255, 255, 0.85); }
 
 /* lanes & clips */
 .lane {

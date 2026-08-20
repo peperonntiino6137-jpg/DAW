@@ -90,13 +90,7 @@ window.addEventListener('DOMContentLoaded', () => {
       else await DAW.audio.play();
       DAW.ui.updatePlayButton();
     } else if (e.code === 'Delete' || e.code === 'Backspace') {
-      if (DAW.ui.selectedClipId) {
-        DAW.removeClip(DAW.ui.selectedClipId);
-        DAW.ui.selectedClipId = null;
-        DAW.ui.renderTracks();
-        DAW.audio.reschedule();
-        DAW.history.commit();
-      }
+      DAW.ui.deleteSelectedClip();
     } else if (e.code === 'KeyL' && !e.ctrlKey && !e.metaKey) {
       DAW.ui.toggleLoop();
     } else if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey) {
@@ -105,39 +99,17 @@ window.addEventListener('DOMContentLoaded', () => {
       e.preventDefault();
       await DAW.ui.toggleRecord();
     } else if (e.code === 'KeyS' && !e.ctrlKey && !e.metaKey) {
-      // 選択中のクリップを再生ヘッド位置で分割
-      if (DAW.ui.selectedClipId && DAW.splitClip(DAW.ui.selectedClipId, DAW.audio.getPos())) {
-        DAW.ui.renderTracks();
-        DAW.audio.reschedule();
-        DAW.history.commit();
-      }
+      // 選択中のクリップを再生ヘッド位置で分割（右クリックメニュー・分割ボタンと同じ経路）
+      DAW.ui.splitSelectedClip();
     } else if (e.code === 'KeyC' && (e.ctrlKey || e.metaKey)) {
-      if (DAW.ui.selectedClipId) DAW.copyClip(DAW.ui.selectedClipId);
+      DAW.ui.copySelectedClip();
     } else if (e.code === 'KeyX' && (e.ctrlKey || e.metaKey)) {
-      if (DAW.ui.selectedClipId && DAW.copyClip(DAW.ui.selectedClipId)) {
-        DAW.removeClip(DAW.ui.selectedClipId);
-        DAW.ui.selectedClipId = null;
-        DAW.ui.renderTracks();
-        DAW.audio.reschedule();
-        DAW.history.commit();
-      }
+      DAW.ui.cutSelectedClip();
     } else if (e.code === 'KeyV' && (e.ctrlKey || e.metaKey)) {
-      const clip = DAW.pasteClip(DAW.audio.getPos());
-      if (clip) {
-        DAW.ui.renderTracks();
-        DAW.ui.selectClip(clip.id);
-        DAW.audio.reschedule();
-        DAW.history.commit();
-      }
+      DAW.ui.pasteClipAt(DAW.audio.getPos());
     } else if (e.code === 'KeyD' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
-      const copy = DAW.ui.selectedClipId && DAW.duplicateClip(DAW.ui.selectedClipId);
-      if (copy) {
-        DAW.ui.renderTracks();
-        DAW.ui.selectClip(copy.id);
-        DAW.audio.reschedule();
-        DAW.history.commit();
-      }
+      DAW.ui.duplicateSelectedClip();
     } else if (e.code === 'KeyZ' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       if (e.shiftKey) await DAW.history.redo();

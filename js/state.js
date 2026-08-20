@@ -7,6 +7,7 @@ const DAW = {
   MIN_PPS: 4,        // 全体を俯瞰する側の限界（1画面に約5分）
   MAX_PPS: 1600,     // 波形を細かく編集する側の限界（1秒に1600px）
   PEAK_BUCKET: 512,  // 波形ピーク計算のバケットサイズ（サンプル数）
+  SPLIT_MIN: 0.02,   // 分割点がクリップ端からこれ以上離れていないと splitClip は何もしない（秒）
 
   buffers: new Map(), // bufferId -> AudioBuffer（クリップ間で共有）
   peaks: new Map(),   // bufferId -> Float32Array [min0, max0, min1, max1, ...]
@@ -227,7 +228,7 @@ const DAW = {
     const found = this.findClip(clipId);
     if (!found) return null;
     const { track, clip } = found;
-    const MIN = 0.02;
+    const MIN = this.SPLIT_MIN;
     if (t <= clip.startTime + MIN || t >= clip.startTime + clip.duration - MIN) return null;
     const left = t - clip.startTime;
     const right = {

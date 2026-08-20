@@ -519,3 +519,49 @@ PANNER の TOP VIEW の隣に **正面ビュー**（`#obj-frontview` / canvas `#
 左右一致） / `toCartesian` 経由であること（スパイで呼び出し回数を確認） / 縦=el・横=az・複合 /
 dist 不変 / 半球の保持 / undo 1エントリ / lock / 選択クリック / dist=0 の NaN ガード。
 rAF は headless で発火しないので `render()` を直接呼ぶ。812/812 passed。
+
+## クリップ編集の右クリックメニューとツールバーボタン（`js/ui.js`・2026-08-20）
+
+カット/コピー/複製/分割/削除はショートカットとして実装済みだったが「見つけにくい」との
+指摘を受け、**クリップの右クリックメニュー**・**レーン空白部の右クリック（貼り付け）**・
+**ツールバーのカット/分割/削除ボタン**として見える形にした。
+
+### 入口は増やすが経路は1本
+
+main.js のキーハンドラに書かれていた処理を `DAW.ui` の共通メソッド
+（`cutSelectedClip` / `copySelectedClip` / `duplicateSelectedClip` / `splitSelectedClip` /
+`deleteSelectedClip` / `pasteClipAt`）へ移し、**キーボード・メニュー・ボタンの三者が同じ関数を
+呼ぶ**構成にした。挙動の二重実装をしないため、undo 粒度（各操作 = commit 1回）も自動的に揃う。
+
+- **分割は常に再生ヘッド位置**。当初は「右クリックした時刻で割る」案だったが、ユーザーから
+  「選択している赤い線（再生ヘッド）の場所で分割して」との指示があり、S キー・分割ボタン・
+  メニューの三者を再生ヘッド位置に統一した。ヘッドがクリップ外なら項目を disabled にする
+  （判定は `splitClip` と同じ端マージン。`state.js` に `SPLIT_MIN: 0.02` として定数化）。
+- **貼り付けだけは右クリックした時刻・レーンのトラック**へ置く（グリッド有効なら吸着、
+  Alt で一時解除）。`pasteClip(time, trackId)` は既に位置とトラックを取れたので拡張不要。
+- クリップボードが空なら貼り付けは disabled。ツールバーの編集ボタンはクリップ選択中のみ有効
+  （`updateEditButtons` を `selectClip` と `renderTracks` から呼ぶ）。
+
+### メニューの作法
+
+`#ctx-menu`（z-index 30 = fx-panel より手前）は常に1個。閉じる仕掛けは init に集約:
+外側 pointerdown / Escape / スクロール / 他所への contextmenu。クリップ・レーンのハンドラは
+`stopPropagation()` するので、document まで届いた contextmenu は「対象外の場所での右クリック」
+だけになり、開く処理と閉じる処理が衝突しない。画面端では fx-panel と同じ流儀で内側へ補正。
+レーンの pointerdown に `e.button !== 0` ガードを足した（右クリック貼り付けのたびに
+シークが走ると、貼りたい位置とヘッドが同時に動いて紛らわしい）。
+
+### テストの落とし穴（`test/tests-clipmenu.js`・グループ `[36]`・44項目）
+
+- レーンのハンドラは `e.offsetX` を見るので、合成 MouseEvent には `Object.defineProperty` で
+  offsetX を足す（tests-nudge の U.18 と同じ）。
+- undo すると `history.apply` が tracks を JSON から作り直すため、**トラック/クリップの参照は
+  毎回 `DAW.project.tracks` から取り直す**。古い参照への検証は必ず空振りする。
+- disabled なボタンは `.click()` してもイベントが飛ばない。これ自体を「無効項目は押しても
+  何も起きない」の検証に使える。
+- **スイートは自分のバッファを片付けてから終わること**。tests-clipmenu は名前順で tests-edit より
+  先に走るが、editSuite は `collectBuffers()` を `history.reset()` より先に呼ぶので、履歴が
+  参照したままのバッファは回収されず、バッファ数を数える E.7 が 2 になって落ちた。
+  finally でクリップ削除 → `history.reset()` → `collectBuffers()` の順に掃除して解決。
+
+856/856 passed。

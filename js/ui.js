@@ -28,6 +28,9 @@ DAW.ui = {
       btnExport: document.getElementById('btn-export'),
       btnUndo: document.getElementById('btn-undo'),
       btnRedo: document.getElementById('btn-redo'),
+      btnCut: document.getElementById('btn-cut'),
+      btnSplit: document.getElementById('btn-split'),
+      btnClipDel: document.getElementById('btn-clip-del'),
       meter: document.getElementById('meter'),
       meterL: document.getElementById('meter-l'),
       meterR: document.getElementById('meter-r'),
@@ -38,6 +41,7 @@ DAW.ui = {
     this.els.scroller.addEventListener('scroll', () => {
       this.drawRuler();
       this.refreshVisibleWaves();
+      this.closeMenu();   // メニューは開いた位置の時刻と結びついているので、ずれたら閉じる
     });
     window.addEventListener('resize', () => this.renderTracks());
 
@@ -78,6 +82,23 @@ DAW.ui = {
     this.els.btnUndo.addEventListener('click', () => DAW.history.undo());
     this.els.btnRedo.addEventListener('click', () => DAW.history.redo());
     this.updateHistoryButtons();
+
+    // クリップ編集ボタン。キーボードショートカットと同じ経路（下の ***SelectedClip）を呼ぶだけ
+    this.els.btnCut.addEventListener('click', () => this.cutSelectedClip());
+    this.els.btnSplit.addEventListener('click', () => this.splitSelectedClip());
+    this.els.btnClipDel.addEventListener('click', () => this.deleteSelectedClip());
+    this.updateEditButtons();
+
+    // 右クリックメニューを閉じる仕掛け。クリップ/レーンのハンドラは stopPropagation するので、
+    // ここへ届く contextmenu は「メニュー対象外の場所での右クリック」だけ。
+    document.addEventListener('pointerdown', e => {
+      const m = document.getElementById('ctx-menu');
+      if (m && !m.contains(e.target)) this.closeMenu();
+    });
+    document.addEventListener('keydown', e => {
+      if (e.code === 'Escape') this.closeMenu();
+    });
+    document.addEventListener('contextmenu', () => this.closeMenu());
 
     this.els.ruler.addEventListener('pointerdown', e => {
       const t = DAW.pxToTime(this.els.scroller.scrollLeft + e.offsetX);
@@ -202,6 +223,7 @@ DAW.ui = {
       tracksEl.appendChild(this.buildTrackRow(track, i, width));
     });
     this.updateDropHint();
+    this.updateEditButtons();   // 選択が消えていたらボタンも無効に戻す
     this.drawRuler();
   },
 
@@ -221,9 +243,16 @@ DAW.ui = {
     lane.style.width = width + 'px';
     this.styleGrid(lane);
     lane.addEventListener('pointerdown', e => {
-      if (e.target !== lane) return;
+      if (e.target !== lane || e.button !== 0) return;   // 右クリックはメニュー側（シークしない）
       DAW.audio.seek(DAW.snapTime(DAW.pxToTime(e.offsetX), e.altKey));
       this.selectClip(null);
+    });
+    // レーン空白部の右クリック: 貼り付けメニュー（貼り付け位置は右クリックした時刻）
+    lane.addEventListener('contextmenu', e => {
+      if (e.target !== lane) return;   // クリップ上はクリップ側のメニューが受ける
+      e.preventDefault();
+      e.stopPropagation();
+      this.openLaneMenu(e, track, DAW.snapTime(DAW.pxToTime(e.offsetX), e.altKey));
     });
     for (const clip of track.clips) {
       lane.appendChild(this.buildClip(clip, track, index));
@@ -472,6 +501,11 @@ DAW.ui = {
 
     el._clip = clip;   // 再描画時の逆引き用（findClip の線形探索を避ける）
     el.addEventListener('pointerdown', e => this.startClipDrag(e, el, clip, track));
+    el.addEventListener('contextmenu', e => {
+      e.preventDefault();      // 既定メニューは出さない
+      e.stopPropagation();     // document 側の「他所での右クリックで閉じる」に届かせない
+      this.openClipMenu(e, clip);
+    });
     return el;
   },
 
@@ -649,6 +683,136 @@ DAW.ui = {
       const el = document.querySelector(`.clip[data-id="${id}"]`);
       if (el) el.classList.add('selected');
     }
+    this.updateEditButtons();
+  },
+
+  // ---- クリップ編集操作 ----
+  // キーボード（main.js）・右クリックメニュー・ツールバーの三者が全て同じ経路を通る。
+  // 状態を変える操作は最後に commit() を1回呼ぶので、どの入口でも undo 粒度は同じ。
+
+  // コピーは状態を変えないので履歴には積まれない
+  copySelectedClip() {
+    return this.selectedClipId ? DAW.copyClip(this.selectedClipId) : null;
+  },
+
+  // カット = コピーしてから削除（undo 1回で丸ごと戻る）
+  cutSelectedClip() {
+    if (!this.selectedClipId || !DAW.copyClip(this.selectedClipId)) return false;
+    return this.deleteSelectedClip();
+  },
+
+  deleteSelectedClip() {
+    if (!this.selectedClipId || !DAW.findClip(this.selectedClipId)) return false;
+    DAW.removeClip(this.selectedClipId);
+    this.selectedClipId = null;
+    this.renderTracks();
+    DAW.audio.reschedule();
+    DAW.history.commit();
+    return true;
+  },
+
+  // 分割は常に再生ヘッド位置（S キー・分割ボタン・右クリックメニューで共通）
+  splitSelectedClip() {
+    if (!this.selectedClipId || !DAW.splitClip(this.selectedClipId, DAW.audio.getPos())) return false;
+    this.renderTracks();
+    DAW.audio.reschedule();
+    DAW.history.commit();
+    return true;
+  },
+
+  // 再生ヘッドがこのクリップを分割できる位置にあるか（splitClip と同じ端の判定）
+  canSplitAtPlayhead(clip) {
+    const pos = DAW.audio.getPos();
+    return pos > clip.startTime + DAW.SPLIT_MIN && pos < clip.startTime + clip.duration - DAW.SPLIT_MIN;
+  },
+
+  pasteClipAt(time, trackId) {
+    const clip = DAW.pasteClip(time, trackId);
+    if (!clip) return null;
+    this.renderTracks();
+    this.selectClip(clip.id);
+    DAW.audio.reschedule();
+    DAW.history.commit();
+    return clip;
+  },
+
+  duplicateSelectedClip() {
+    const copy = this.selectedClipId && DAW.duplicateClip(this.selectedClipId);
+    if (!copy) return null;
+    this.renderTracks();
+    this.selectClip(copy.id);
+    DAW.audio.reschedule();
+    DAW.history.commit();
+    return copy;
+  },
+
+  // ツールバーの編集ボタンはクリップ選択中だけ押せる
+  updateEditButtons() {
+    if (!this.els.btnCut) return;
+    const on = !!(this.selectedClipId && DAW.findClip(this.selectedClipId));
+    this.els.btnCut.disabled = !on;
+    this.els.btnSplit.disabled = !on;
+    this.els.btnClipDel.disabled = !on;
+  },
+
+  // ---- 右クリックメニュー ----
+
+  closeMenu() {
+    const m = document.getElementById('ctx-menu');
+    if (m) m.remove();
+  },
+
+  // items: { label, key, disabled, run } の配列。メニューは常に1個だけ（開き直しで前を閉じる）。
+  // 閉じる仕掛け（外側クリック / Escape / スクロール / 他所での右クリック）は init で張ってある。
+  showMenu(x, y, items) {
+    this.closeMenu();
+    const menu = document.createElement('div');
+    menu.id = 'ctx-menu';
+    menu.addEventListener('contextmenu', e => e.preventDefault());   // メニュー上の右クリックは無視
+    for (const it of items) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'ctx-item';
+      row.disabled = !!it.disabled;
+      const lab = document.createElement('span');
+      lab.textContent = it.label;
+      const key = document.createElement('span');
+      key.className = 'ctx-key';
+      key.textContent = it.key || '';
+      row.append(lab, key);
+      row.addEventListener('click', () => {
+        this.closeMenu();
+        it.run();
+      });
+      menu.appendChild(row);
+    }
+    document.body.appendChild(menu);
+    // 画面端では内側に補正する（fx-panel と同じ流儀）
+    const r = menu.getBoundingClientRect();
+    menu.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 4)) + 'px';
+    menu.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 4)) + 'px';
+    return menu;
+  },
+
+  // クリップの右クリック。分割は再生ヘッド位置（S キーと同じ）。ヘッドがクリップ外なら無効表示。
+  openClipMenu(e, clip) {
+    this.selectClip(clip.id);
+    this.showMenu(e.clientX, e.clientY, [
+      { label: 'カット', key: 'Ctrl+X', run: () => this.cutSelectedClip() },
+      { label: 'コピー', key: 'Ctrl+C', run: () => this.copySelectedClip() },
+      { label: '複製', key: 'Ctrl+D', run: () => this.duplicateSelectedClip() },
+      { label: '再生ヘッド位置で分割', key: 'S', disabled: !this.canSplitAtPlayhead(clip),
+        run: () => this.splitSelectedClip() },
+      { label: '削除', key: 'Delete', run: () => this.deleteSelectedClip() },
+    ]);
+  },
+
+  // レーン空白部の右クリック。貼り付け先は右クリックしたレーンのトラックと時刻。
+  openLaneMenu(e, track, t) {
+    this.showMenu(e.clientX, e.clientY, [
+      { label: '貼り付け', key: 'Ctrl+V', disabled: !DAW.clipboard,
+        run: () => this.pasteClipAt(t, track.id) },
+    ]);
   },
 
   laneAtY(clientY) {
