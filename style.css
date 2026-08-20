@@ -817,3 +817,22 @@ input[type="range"] { accent-color: var(--accent); }
 }
 #obj-out button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 #obj-out-note { margin-top: 6px; font-size: 10px; color: var(--dim); line-height: 1.5; }
+
+/* ---- METERING 画面（ラウドネスメーター）。DOM は js/objui.js が生成する ---- */
+#obj-loud-sec { flex: 0 1 480px; min-width: 280px; gap: 8px; justify-content: center; }
+#obj-loud-reset { padding: 1px 8px; font-size: 10px; color: var(--dim); }
+.obj-loud-row { display: flex; align-items: center; gap: 8px; }
+.ol-lab { width: 82px; flex: none; font-size: 10px; letter-spacing: 1px; color: var(--dim); }
+.ol-bar { flex: 1; height: 8px; background: #26262e; border-radius: 2px; overflow: hidden; }
+.ol-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #3fbf7f 0%, #3fbf7f 70%, #e0c93f 88%, #ff5252 100%);
+}
+.ol-val { font-family: Consolas, monospace; font-size: 11px; min-width: 88px; text-align: right; color: var(--text); }
+.ol-val.warn { color: #e0c93f; }
+.ol-val.hot { color: #ff5252; }
+#obj-loud-note { font-size: 10px; color: #5f5f6b; }
+#obj-loud-report-sec { flex: 1; justify-content: center; }
+#obj-loud-report { font-family: Consolas, monospace; font-size: 11px; color: var(--dim); line-height: 1.6; }

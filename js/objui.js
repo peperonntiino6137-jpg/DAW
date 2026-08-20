@@ -99,6 +99,7 @@ DAW.objui = {
       dock: $('obj-dock'),
       tabPanner: $('tab-panner'),
       tabRenderer: $('tab-renderer'),
+      tabMetering: $('tab-metering'),
       panner: $('obj-panner'),
       renderer: $('obj-renderer'),
       count: $('obj-count'),
@@ -131,6 +132,7 @@ DAW.objui = {
 
     this.els.tabPanner.addEventListener('click', () => this.setView('panner'));
     this.els.tabRenderer.addEventListener('click', () => this.setView('renderer'));
+    if (this.els.tabMetering) this.els.tabMetering.addEventListener('click', () => this.setView('metering'));
 
     this.els.add.addEventListener('click', () => this.addObject());
     this.els.del.addEventListener('click', () => this.removeSelected());
@@ -172,6 +174,7 @@ DAW.objui = {
     // ノブのドラッグは共通ノブ（DAW.knob）が window で受ける
 
     this.buildRenderer();
+    this.buildMetering();
 
     // 横スクロールで可視範囲が変わったらストリップを差分更新する
     this.els.stripScroll.addEventListener('scroll', () => this.renderStrips());
@@ -189,14 +192,21 @@ DAW.objui = {
   // ---- 表示の切り替え ----
 
   setView(name) {
-    this.view = name === 'renderer' ? 'renderer' : 'panner';
-    const isP = this.view === 'panner';
-    this.els.panner.classList.toggle('hidden', !isP);
-    this.els.renderer.classList.toggle('hidden', isP);
-    this.els.tabPanner.classList.toggle('on', isP);
-    this.els.tabRenderer.classList.toggle('on', !isP);
-    // RENDERER ではストリップ帯が無いぶん球ビューを広く取る（12個のスピーカー番号を並べるため）
-    if (this.els.sphereWrap) this.els.sphereWrap.classList.toggle('wide', !isP);
+    this.view = name === 'renderer' || name === 'metering' ? name : 'panner';
+    const v = this.view;
+    this.els.panner.classList.toggle('hidden', v !== 'panner');
+    this.els.renderer.classList.toggle('hidden', v !== 'renderer');
+    if (this.els.metering) this.els.metering.classList.toggle('hidden', v !== 'metering');
+    this.els.tabPanner.classList.toggle('on', v === 'panner');
+    this.els.tabRenderer.classList.toggle('on', v === 'renderer');
+    if (this.els.tabMetering) this.els.tabMetering.classList.toggle('on', v === 'metering');
+    // RENDERER / METERING ではストリップ帯が無いぶん球ビューを広く取る
+    if (this.els.sphereWrap) this.els.sphereWrap.classList.toggle('wide', v !== 'panner');
+    // METERING を開いたらラウドネス計測タップ（AudioWorklet）を仕掛ける。
+    // 一度付けば閉じても計測は続く（Integrated は聴取全体の蓄積が意味を持つため）。
+    if (v === 'metering' && DAW.audio && DAW.audio.ensureLoudness) {
+      Promise.resolve(DAW.audio.ensureLoudness()).catch(() => {});
+    }
     this.render();   // 隠れている間は描いていないので、戻ったときに描き直す
   },
 
@@ -217,6 +227,7 @@ DAW.objui = {
       this.drawSphere();
       this.renderStrips();
       this.renderRenderer();
+      if (this.view === 'metering') this.updateLoudness();
       this.syncTrackBadges();
       this._sig = this.stateSig();
     } finally {
@@ -1702,6 +1713,7 @@ DAW.objui = {
       this.syncPeak(el, id);
     }
     this.updateMasterMeter();
+    if (this.view === 'metering') this.updateLoudness();   // ラウドネスも同じ 30fps で
     // トラックヘッダのバッジもここで貼り直す。renderTracks() は state を変えずに
     // DOM を作り直すことがある（リサイズ・ズーム等）ので、署名同期だけでは拾えない。
     this.syncTrackBadges();
@@ -1856,6 +1868,106 @@ DAW.objui = {
     el.title = `${spec.jp}（${r[0]}〜${r[1]}${spec.unit}）: 上下ドラッグで変更 / Ctrl か Shift で微調整 / ダブルクリックで既定値`;
     this.knobs.set(spec.key, el);
     return el;
+  },
+
+  // METERING 画面（ラウドネスメーター）。index.html は最小限に保つ規約なので、
+  // ペインの DOM はここで組み立てて #obj-body へ差し込む（タブのボタンだけ HTML にある）。
+  buildMetering() {
+    const body = document.getElementById('obj-body');
+    if (!body || !this.els.renderer) return;
+    const pane = document.createElement('div');
+    pane.id = 'obj-metering';
+    pane.className = 'obj-view hidden';
+
+    // ラウドネス（M / S / I / TP の4行 + リセット）
+    const sec = document.createElement('div');
+    sec.className = 'obj-rend-sec';
+    sec.id = 'obj-loud-sec';
+    const title = document.createElement('div');
+    title.className = 'obj-sec-title';
+    const tl = document.createElement('span');
+    tl.textContent = 'ラウドネス（ITU-R BS.1770-4）';
+    const reset = document.createElement('button');
+    reset.id = 'obj-loud-reset';
+    reset.textContent = 'リセット';
+    reset.title = 'Integrated と True Peak の蓄積をやり直す（Momentary / Short Term は流れてくる音からすぐ再構築される）';
+    reset.addEventListener('click', () => { DAW.loudness.reset(); this.updateLoudness(); });
+    title.append(tl, reset);
+    sec.appendChild(title);
+
+    const rows = {};
+    for (const [key, lab, unit, tip] of [
+      ['m', 'MOMENTARY', 'LUFS', '瞬時ラウドネス（400ms 窓）'],
+      ['s', 'SHORT TERM', 'LUFS', '短期ラウドネス（3s 窓）'],
+      ['i', 'INTEGRATED', 'LUFS', '統合ラウドネス（-70 LUFS 絶対 / -10 LU 相対ゲーティング付き。リセットからの蓄積）'],
+      ['tp', 'TRUE PEAK', 'dBTP', 'トゥルーピーク（4倍オーバーサンプリング。サンプル点の間に隠れたピークも検出）'],
+    ]) {
+      const row = document.createElement('div');
+      row.className = 'obj-loud-row';
+      row.title = tip;
+      const l = document.createElement('span');
+      l.className = 'ol-lab';
+      l.textContent = lab;
+      const barWrap = document.createElement('div');
+      barWrap.className = 'ol-bar';
+      const bar = document.createElement('i');
+      barWrap.appendChild(bar);
+      const val = document.createElement('span');
+      val.className = 'ol-val';
+      val.textContent = '-∞ ' + unit;
+      row.append(l, barWrap, val);
+      sec.appendChild(row);
+      rows[key] = { bar, val, unit };
+    }
+    const note = document.createElement('div');
+    note.id = 'obj-loud-note';
+    note.textContent = 'タップはリミッター前（どれだけ突っ込んでいるかが見える）。一度開くと閉じても計測は続く';
+    sec.appendChild(note);
+
+    // 書き出しレポート（最後の WAV 書き出しの Integrated / True Peak）
+    const rsec = document.createElement('div');
+    rsec.className = 'obj-rend-sec';
+    rsec.id = 'obj-loud-report-sec';
+    const rtitle = document.createElement('div');
+    rtitle.className = 'obj-sec-title';
+    rtitle.textContent = '書き出しレポート';
+    const report = document.createElement('div');
+    report.id = 'obj-loud-report';
+    rsec.append(rtitle, report);
+
+    pane.append(sec, rsec);
+    body.appendChild(pane);
+    this.els.metering = pane;
+    this.els.loud = { m: rows.m, s: rows.s, i: rows.i, tp: rows.tp, reset, report };
+  },
+
+  // LUFS の目盛（-60 LUFS を 0%、0 を 100%）。ピークの meterPct と同じ考え方
+  lufsPct(v) {
+    if (!isFinite(v)) return 0;
+    return Math.max(0, Math.min(100, (1 + v / 60) * 100)).toFixed(1);
+  },
+
+  // METERING 画面の値を流し込む。計算は AudioWorklet 側（DAW.loudness.live を読むだけ）
+  updateLoudness() {
+    const r = this.els.loud;
+    if (!r) return;
+    const lv = DAW.loudness.live;
+    const F = v => DAW.loudness.fmt(v);
+    const set = (row, v) => {
+      const txt = `${F(v)} ${row.unit}`;
+      if (row.val.textContent !== txt) row.val.textContent = txt;
+      row.bar.style.width = this.lufsPct(v) + '%';
+    };
+    set(r.m, lv.momentary);
+    set(r.s, lv.shortTerm);
+    set(r.i, lv.integrated);
+    set(r.tp, lv.truePeakDb);
+    r.tp.val.className = 'ol-val ' + this.peakClass(lv.truePeak);   // 0dBTP 超過を色で示す
+    const rep = DAW.wav && DAW.wav.lastExportLoudness;
+    const txt = rep
+      ? `${rep.file}: Integrated ${F(rep.integrated)} LUFS / True Peak ${F(rep.truePeakDb)} dBTP`
+      : 'まだ書き出していません（WAV書き出し時に計測されます）';
+    if (r.report.textContent !== txt) r.report.textContent = txt;
   },
 
   renderRenderer() {

@@ -93,6 +93,14 @@ DAW.audio = {
     return node;
   },
 
+  // ラウドネス計測タップ（BS.1770-4）。METERING タブが開いたときだけ作る。
+  // タップ位置は masterGain 直後 = **リミッター前**（ピークメーターと同じ規約。
+  // どれだけ突っ込んでいるかが見えるほうが有用で、表示の遅延補正も要らない）。
+  async ensureLoudness() {
+    this.ensureCtx();
+    return DAW.loudness.attach(this.ctx, this.masterGain);
+  },
+
   // 画面表示用の再生位置。リミッターの先読みぶん出力が遅れるので、その分だけ戻す。
   displayPos() {
     return Math.max(0, this.getPos() - (this.isPlaying() ? DAW.limiter.latencySec() : 0));
