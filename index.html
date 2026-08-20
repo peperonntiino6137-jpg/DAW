@@ -10,14 +10,64 @@
   <header id="transport">
     <button id="btn-play" title="再生/一時停止 (Space)">▶</button>
     <button id="btn-stop" title="停止">■</button>
+    <button id="btn-loop" title="ループ再生（ルーラーを Shift+ドラッグで区間指定 / L キー）">⟲</button>
+    <button id="btn-record" title="録音（新しいトラックに録る / R キー）">●</button>
     <div id="time-display">0:00.0</div>
     <label class="master-label">マスター
       <input id="master-vol" type="range" min="0" max="1.5" step="0.01" value="1">
     </label>
+    <button id="btn-undo" title="元に戻す (Ctrl+Z)" disabled>↶</button>
+    <button id="btn-redo" title="やり直す (Ctrl+Shift+Z)" disabled>↷</button>
+    <!-- クリップ編集（選択中のみ有効）。右クリックメニューと同じ経路を呼ぶ -->
+    <div class="edit-group">
+      <button id="btn-cut" title="選択クリップをカット (Ctrl+X)" disabled>カット</button>
+      <button id="btn-split" title="選択クリップを再生ヘッド位置で分割 (S)" disabled>分割</button>
+      <button id="btn-clip-del" title="選択クリップを削除 (Delete)" disabled>削除</button>
+    </div>
+    <div id="meter" title="マスター出力レベル（クリックでクリップ表示をリセット）">
+      <div class="m-bars">
+        <div class="m-bar"><i id="meter-l"></i></div>
+        <div class="m-bar"><i id="meter-r"></i></div>
+      </div>
+      <span id="meter-db">-∞</span>
+      <span id="meter-clip">CLIP</span>
+    </div>
+    <div class="grid-group">
+      <label title="テンポ（1分あたりの拍数）">BPM
+        <input id="bpm" type="number" min="20" max="300" step="1" value="120">
+      </label>
+      <button id="btn-metro" title="メトロノーム（録音・再生中にクリックを鳴らす。書き出しには入らない）">♩</button>
+      <button id="btn-snap" title="グリッドの表示とスナップ（ドラッグ中に Alt で一時解除）">グリッド</button>
+      <select id="grid-div" title="グリッドの細かさ">
+        <option value="4">1小節</option>
+        <option value="1" selected>1拍</option>
+        <option value="0.5">1/2拍</option>
+        <option value="0.25">1/4拍</option>
+      </select>
+    </div>
+    <div class="zoom-group">
+      <button id="btn-zoom-out" title="ズームアウト (Ctrl+ホイール / - キー)">－</button>
+      <span id="zoom-label" title="100 px/秒">1.0×</span>
+      <button id="btn-zoom-in" title="ズームイン (Ctrl+ホイール / + キー)">＋</button>
+      <button id="btn-zoom-fit" title="全体を表示 (0 キー)">全体</button>
+    </div>
     <div class="spacer"></div>
     <button id="btn-add-track">＋ トラック</button>
     <button id="btn-import">音声を読み込み</button>
-    <button id="btn-export">WAV書き出し</button>
+    <div class="export-group">
+      <select id="export-depth" title="書き出しのビット深度（32bit float は 0dBFS 超もそのまま保存できる）">
+        <option value="16" selected>16bit</option>
+        <option value="24">24bit</option>
+        <option value="32f">32f</option>
+      </select>
+      <select id="export-rate" title="書き出しのサンプルレート（既定は再生と同一）">
+        <option value="0" selected>SRそのまま</option>
+        <option value="44100">44.1k</option>
+        <option value="48000">48k</option>
+        <option value="96000">96k</option>
+      </select>
+      <button id="btn-export">WAV書き出し</button>
+    </div>
     <button id="btn-save">保存</button>
     <button id="btn-open">開く</button>
     <input type="file" id="file-input" accept="audio/*" multiple hidden>
@@ -36,16 +86,157 @@
     <div id="drop-hint">音声ファイル（WAV / MP3 / OGG）をここにドロップ</div>
   </div>
 
+  <!-- オブジェクトベース音響の操作画面。タイムラインの下にドッキングする。
+       中身の生成・描画は js/objui.js（DAW.objui）が担当し、state は DAW.objects 一本。 -->
+  <section id="obj-dock">
+    <div id="obj-tabs">
+      <button id="tab-panner" class="obj-tab on">PANNER</button>
+      <button id="tab-renderer" class="obj-tab">RENDERER</button>
+      <button id="tab-metering" class="obj-tab" title="ラウドネスメータリング（BS.1770-4: Momentary / Short Term / Integrated / True Peak）">METERING</button>
+      <div class="obj-tools">
+        <button id="obj-bypass" class="obj-frame" disabled title="バイパス（後日実装）">BYPASS</button>
+        <button id="obj-light" class="obj-frame" disabled title="ヒント表示（後日実装）">💡</button>
+        <button id="obj-ab" class="obj-frame" disabled title="A/B 比較（後日実装）">A/B</button>
+        <div id="obj-cpu" title="CPU負荷（後日実装）">
+          <span>CPU</span>
+          <div class="om-bar"><i id="obj-cpu-bar"></i></div>
+        </div>
+        <div id="obj-mmeter" title="マスター出力レベル（後日実装）">
+          <div class="om-bars">
+            <div class="om-bar"><i id="obj-mm-l"></i></div>
+            <div class="om-bar"><i id="obj-mm-r"></i></div>
+          </div>
+          <span id="obj-mdb">-∞</span>
+        </div>
+        <button id="obj-bounce" class="obj-frame" disabled title="オブジェクトの書き出し（後日実装）">書き出し</button>
+      </div>
+      <div class="obj-spacer"></div>
+      <button id="obj-add" title="オブジェクトを追加">＋</button>
+      <button id="obj-del" title="選択中のオブジェクトを削除">－</button>
+      <div id="obj-count" title="使用中のオブジェクト数 / 上限">0 / 128</div>
+    </div>
+
+    <!-- タブに関係なく常に見える 3D 球ビュー。PANNER ではオブジェクトの az/el を、
+         RENDERER ではそこにスピーカー配置を重ねて確認する。 -->
+    <div id="obj-body">
+    <div id="obj-sphereview">
+      <div class="obj-view-label">3D VIEW</div>
+      <canvas id="obj-sphere" title="ドラッグで選択中のオブジェクトの方位・仰角を動かす（距離はトップビュー）"></canvas>
+    </div>
+
+    <div id="obj-panner" class="obj-view">
+      <div id="obj-topview">
+        <div class="obj-view-label">TOP VIEW</div>
+        <!-- 経路（位置オートメーション）。有効切替と編集モード。状態同期は js/objui.js -->
+        <div id="obj-path-tools">
+          <button id="obj-path-enable" title="選択中のオブジェクトの経路（位置オートメーション）を有効/無効にする">経路</button>
+          <button id="obj-path-edit" title="経路の編集モード（空きクリック=点を追加 / 点をドラッグ=移動 / 右クリック=削除 / セグメント中点=緩急の切替 / 時間チップを左右ドラッグ=時刻）">編集</button>
+          <button id="obj-path-gen" title="軌道ジェネレータ（円 / スパイラル / 8の字 / 往復の経路を自動生成。ループの切替もここから）">生成</button>
+        </div>
+        <canvas id="obj-top" title="クリック・ドラッグで選択中のオブジェクトを動かす"></canvas>
+      </div>
+      <!-- 正面ビュー。リスナーを背後から見る（3D球ビューと同じ向き）。横=左右、縦=高さ。 -->
+      <div id="obj-frontview">
+        <div class="obj-view-label">FRONT VIEW</div>
+        <canvas id="obj-front" title="ドラッグで選択中のオブジェクトの左右・高さを動かす（距離はトップビュー）"></canvas>
+      </div>
+      <div id="obj-strip-area">
+        <!-- 可視ぶんのストリップだけを絶対配置で置く。幅は DAW.objui が設定する -->
+        <div id="obj-strip-scroll"><div id="obj-strips"></div></div>
+        <div id="obj-master" class="obj-strip is-master">
+          <div class="os-head"><i class="os-dot"></i><span class="os-title">MASTER</span></div>
+          <div class="os-limit" title="リミッター（後日実装）">LIMIT</div>
+          <label class="os-num"><span>Ceil</span>
+            <input id="obj-ceiling" type="number" value="-1" step="0.1" disabled title="シーリング（後日実装）">
+          </label>
+          <div class="os-peak">-∞</div>
+          <input class="os-fader" type="range" min="-72" max="6" step="0.1" value="0" disabled
+                 title="マスターゲイン（後日実装）">
+          <div class="os-ms">
+            <button class="os-mute" disabled>M</button>
+            <button class="os-solo" disabled>S</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RENDERER。スピーカー配置の選択とマスターリミッター。
+         中身（配置ボタン・ノブ・スピーカー表）は js/objui.js が生成する。 -->
+    <div id="obj-renderer" class="obj-view hidden">
+      <div class="obj-rend-sec" id="obj-out-sec">
+        <div class="obj-sec-title">出力形式</div>
+        <div id="obj-out"></div>
+        <div id="obj-out-note">バイノーラルは編集中に等パワー、試聴中だけ HRTF に切り替わる（CPU対策）</div>
+      </div>
+      <div class="obj-rend-sec" id="obj-layout-sec">
+        <div class="obj-sec-title">スピーカー配置</div>
+        <div id="obj-layouts"></div>
+        <div id="obj-spk-list"></div>
+      </div>
+      <!-- ch 別出力メーター。本数は配置の ch 数から js/objui.js が可変で生成する -->
+      <div class="obj-rend-sec" id="obj-chmeter-sec">
+        <div class="obj-sec-title">出力メーター</div>
+        <div id="obj-chmeters"></div>
+        <div id="obj-chmeter-note">リミッター前のタップ。スピーカー出力時は各ch、バイノーラル時は L/R</div>
+      </div>
+      <!-- ルームリバーブ（オブジェクト共有のセンドバス）。ノブは js/objui.js が生成する -->
+      <div class="obj-rend-sec" id="obj-rev-sec">
+        <div class="obj-sec-title"><span>ルームリバーブ</span></div>
+        <div id="obj-rev-knobs"></div>
+        <div id="obj-rev-note">各オブジェクトの Rev センドが集まる空間の残響。遠いオブジェクトほど湿る（Return 0 でオフ）</div>
+      </div>
+      <div class="obj-rend-sec" id="obj-lim-sec">
+        <div class="obj-sec-title">
+          <span>マスターリミッター</span>
+          <button id="obj-lim-byp" title="リミッターをバイパスする">BYPASS</button>
+        </div>
+        <div id="obj-knobs"></div>
+        <div id="obj-lim-note">先読み型。シーリングを超えるサンプルは出力されない（ドラッグで値を変更 / ダブルクリックで既定値）</div>
+      </div>
+      <!-- オブジェクトの書き出し（ADM / オブジェクト別 WAV）。実処理は js/adm.js -->
+      <div class="obj-rend-sec" id="obj-export-sec">
+        <div class="obj-sec-title">オブジェクト書き出し</div>
+        <div id="obj-export-btns">
+          <button id="obj-adm" title="ADM (ITU-R BS.2076) メタデータ付き BW64 を書き出す。各オブジェクトは1チャンネルの素の音声（定位・リバーブなし）">ADM (BW64)</button>
+          <button id="obj-wavs" title="割り当てトラックのあるオブジェクトを1本ずつモノラル WAV でダウンロードする">オブジェクト別 WAV</button>
+        </div>
+        <div id="obj-export-note">位置・経路・距離はメタデータとして保存され、対応レンダラーが再生時に定位する</div>
+      </div>
+    </div>
+    </div>
+  </section>
+
+  <!-- ヒントバー。ノブの hover / ドラッグ中に「パラメータ名: 現在値」を出す（DAW.ui.setHint） -->
+  <div id="hint-bar"></div>
+
   <script src="js/state.js"></script>
+  <script src="js/objects.js"></script>
   <script src="js/plugins.js"></script>
+  <script src="js/wrapper.js"></script>
+  <script src="js/history.js"></script>
+  <script src="js/record.js"></script>
   <script src="js/wav.js"></script>
+  <script src="js/limiter.js"></script>
+  <script src="js/loudness.js"></script>
   <script src="js/audio.js"></script>
+  <script src="js/objaudio.js"></script>
+  <script src="js/adm.js"></script>
+  <script src="js/stems.js"></script>
+  <script src="js/knob.js"></script>
   <script src="js/ui.js"></script>
+  <script src="js/objui.js"></script>
   <script src="js/main.js"></script>
   <!-- プラグイン: js/plugins/ にファイルを置き、ここに <script> を1行追加する -->
   <script src="js/plugins/lowpass.js"></script>
   <script src="js/plugins/delay.js"></script>
+  <script src="js/plugins/delay3.js"></script>
   <script src="js/plugins/eq.js"></script>
   <script src="js/plugins/dyneq.js"></script>
+  <script src="js/plugins/comp.js"></script>
+  <script src="js/plugins/reverb.js"></script>
+  <script src="js/plugins/paraeq.js"></script>
+  <script src="js/plugins/multiband.js"></script>
+  <script src="js/plugins/goodizer.js"></script>
+  <script src="js/plugins/timefx.js"></script>
 </body>
 </html>

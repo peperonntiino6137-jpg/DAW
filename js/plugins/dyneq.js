@@ -126,10 +126,10 @@ registerProcessor('dyn-eq3', DynEQ3);
       if (ready.has(ctx)) return Promise.resolve();
       let p = loading.get(ctx);
       if (!p) {
-        const url = URL.createObjectURL(new Blob([PROCESSOR], { type: 'application/javascript' }));
+        // blob: URL は file:// で AbortError になるので data: URL（limiter.js と同じ理由）
+        const url = 'data:text/javascript;charset=utf-8,' + encodeURIComponent(PROCESSOR);
         p = ctx.audioWorklet.addModule(url).then(() => {
           ready.add(ctx);
-          URL.revokeObjectURL(url);
         });
         loading.set(ctx, p);
       }

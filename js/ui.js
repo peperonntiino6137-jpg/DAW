@@ -17,27 +17,126 @@ DAW.ui = {
       time: document.getElementById('time-display'),
       btnPlay: document.getElementById('btn-play'),
       dropHint: document.getElementById('drop-hint'),
+      zoomLabel: document.getElementById('zoom-label'),
+      bpm: document.getElementById('bpm'),
+      btnSnap: document.getElementById('btn-snap'),
+      btnMetro: document.getElementById('btn-metro'),
+      gridDiv: document.getElementById('grid-div'),
+      masterVol: document.getElementById('master-vol'),
+      btnRecord: document.getElementById('btn-record'),
+      btnLoop: document.getElementById('btn-loop'),
+      btnExport: document.getElementById('btn-export'),
+      btnUndo: document.getElementById('btn-undo'),
+      btnRedo: document.getElementById('btn-redo'),
+      btnCut: document.getElementById('btn-cut'),
+      btnSplit: document.getElementById('btn-split'),
+      btnClipDel: document.getElementById('btn-clip-del'),
+      meter: document.getElementById('meter'),
+      meterL: document.getElementById('meter-l'),
+      meterR: document.getElementById('meter-r'),
+      meterDb: document.getElementById('meter-db'),
+      meterClip: document.getElementById('meter-clip'),
     };
 
-    this.els.scroller.addEventListener('scroll', () => this.drawRuler());
+    this.els.scroller.addEventListener('scroll', () => {
+      this.drawRuler();
+      this.refreshVisibleWaves();
+      this.closeMenu();   // メニューは開いた位置の時刻と結びついているので、ずれたら閉じる
+    });
     window.addEventListener('resize', () => this.renderTracks());
+
+    // ズーム: ボタン / Ctrl+ホイール（ポインタ位置の時刻を固定して拡大縮小）
+    document.getElementById('btn-zoom-in').addEventListener('click', () => this.zoomBy(1.5));
+    document.getElementById('btn-zoom-out').addEventListener('click', () => this.zoomBy(1 / 1.5));
+    document.getElementById('btn-zoom-fit').addEventListener('click', () => this.zoomToFit());
+    this.els.scroller.addEventListener('wheel', e => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      this.zoomBy(Math.pow(1.0015, -e.deltaY), e.clientX);
+    }, { passive: false });
+    this.updateZoomLabel();
+
+    // グリッド（BPM / スナップ）
+    this.els.bpm.addEventListener('input', () => {
+      DAW.setBpm(+this.els.bpm.value);
+      this.applyGrid();
+    });
+    this.els.bpm.addEventListener('change', () => {
+      this.els.bpm.value = DAW.project.bpm;
+      DAW.history.commit();
+    });
+    this.els.btnMetro.addEventListener('click', () => this.toggleMetronome());
+    this.els.btnSnap.addEventListener('click', () => {
+      DAW.grid.enabled = !DAW.grid.enabled;
+      this.els.btnSnap.classList.toggle('on', DAW.grid.enabled);
+      this.applyGrid();
+    });
+    this.els.gridDiv.addEventListener('change', () => {
+      DAW.grid.division = +this.els.gridDiv.value;
+      this.applyGrid();
+    });
+
+    // メーターのクリックでクリップ表示をリセット
+    this.els.meter.addEventListener('click', () => this.resetClip());
+
+    this.els.btnUndo.addEventListener('click', () => DAW.history.undo());
+    this.els.btnRedo.addEventListener('click', () => DAW.history.redo());
+    this.updateHistoryButtons();
+
+    // クリップ編集ボタン。キーボードショートカットと同じ経路（下の ***SelectedClip）を呼ぶだけ
+    this.els.btnCut.addEventListener('click', () => this.cutSelectedClip());
+    this.els.btnSplit.addEventListener('click', () => this.splitSelectedClip());
+    this.els.btnClipDel.addEventListener('click', () => this.deleteSelectedClip());
+    this.updateEditButtons();
+
+    // 右クリックメニューを閉じる仕掛け。クリップ/レーンのハンドラは stopPropagation するので、
+    // ここへ届く contextmenu は「メニュー対象外の場所での右クリック」だけ。
+    document.addEventListener('pointerdown', e => {
+      const m = document.getElementById('ctx-menu');
+      if (m && !m.contains(e.target)) this.closeMenu();
+    });
+    document.addEventListener('keydown', e => {
+      if (e.code === 'Escape') this.closeMenu();
+    });
+    document.addEventListener('contextmenu', () => this.closeMenu());
 
     this.els.ruler.addEventListener('pointerdown', e => {
       const t = DAW.pxToTime(this.els.scroller.scrollLeft + e.offsetX);
-      DAW.audio.seek(t);
+      if (e.shiftKey) {          // Shift+ドラッグでループ区間を引く
+        this.startLoopDrag(e, t);
+        return;
+      }
+      DAW.audio.seek(DAW.snapTime(t, e.altKey));
     });
 
     // ドラッグ&ドロップ読み込み
     this.els.scroller.addEventListener('dragover', e => e.preventDefault());
     this.els.scroller.addEventListener('drop', e => this.onDrop(e));
 
-    // FXパネルの外側クリックで閉じる
+    // FXラック（パネル）の外側クリックで閉じる。右クリックメニューと
+    // ノブのインライン入力はラックの操作の一部なので閉じる対象にしない
     document.addEventListener('pointerdown', e => {
       const panel = document.getElementById('fx-panel');
-      if (panel && !panel.contains(e.target) && !e.target.closest('.fx-chip')) panel.remove();
+      if (panel && !panel.contains(e.target) && !e.target.closest('.fx-rack-btn')
+          && !e.target.closest('#ctx-menu') && !e.target.closest('#knob-input')) {
+        this.closeFxRack();
+      }
     });
 
     requestAnimationFrame(() => this.tick());
+  },
+
+  // トラックを上下に動かす。色はトラック位置で決まるのでクリップも描き直す。
+  moveTrack(trackId, delta) {
+    if (!DAW.moveTrack(trackId, delta)) return;
+    this.renderTracks();
+    DAW.history.commit();
+  },
+
+  updateHistoryButtons() {
+    if (!this.els.btnUndo) return;
+    this.els.btnUndo.disabled = !DAW.history.canUndo();
+    this.els.btnRedo.disabled = !DAW.history.canRedo();
   },
 
   fmtTime(t) {
@@ -46,11 +145,75 @@ DAW.ui = {
     return `${m}:${(t - m * 60).toFixed(1).padStart(4, '0')}`;
   },
 
+  // レーン領域は content 内で HEAD_W だけ右にずれている
+  laneViewLeft() {
+    return this.els.scroller.getBoundingClientRect().left + this.HEAD_W;
+  },
+
+  timeAtClientX(clientX) {
+    return DAW.pxToTime(this.els.scroller.scrollLeft + clientX - this.laneViewLeft());
+  },
+
+  // 画面上の anchorClientX（既定はビュー中央）にある時刻を固定したままズームする
+  setZoom(pps, anchorClientX) {
+    const sc = this.els.scroller;
+    const viewW = sc.clientWidth - this.HEAD_W;
+    const ax = anchorClientX == null ? this.laneViewLeft() + viewW / 2 : anchorClientX;
+    const anchorT = this.timeAtClientX(ax);
+    if (!DAW.setPPS(pps)) return;
+    this.renderTracks();
+    const offsetInView = ax - this.laneViewLeft();
+    sc.scrollLeft = Math.max(0, DAW.timeToPx(anchorT) - offsetInView);
+    this.drawRuler();
+    this.updateZoomLabel();
+  },
+
+  zoomBy(factor, anchorClientX) {
+    this.setZoom(DAW.PPS * factor, anchorClientX);
+  },
+
+  // プロジェクト全体が1画面に収まる倍率へ
+  zoomToFit() {
+    const viewW = this.els.scroller.clientWidth - this.HEAD_W;
+    const dur = DAW.projectDuration();
+    const pps = dur > 0 ? (viewW - 24) / dur : DAW.DEFAULT_PPS;
+    DAW.setPPS(pps);
+    this.renderTracks();
+    this.els.scroller.scrollLeft = 0;
+    this.updateZoomLabel();
+
+  },
+
+  // レーン背景に拍/小節の格子を描く。細かすぎる場合は間引く。
+  styleGrid(lane) {
+    if (!DAW.grid.enabled) {
+      lane.style.backgroundImage = '';
+      return;
+    }
+    const stepPx = DAW.timeToPx(DAW.gridStep());
+    const barPx = DAW.timeToPx(DAW.barDuration());
+    const layers = [`repeating-linear-gradient(90deg, rgba(255,255,255,0.13) 0 1px, transparent 1px ${barPx}px)`];
+    if (stepPx >= 6 && stepPx < barPx - 0.5) {
+      layers.push(`repeating-linear-gradient(90deg, rgba(255,255,255,0.05) 0 1px, transparent 1px ${stepPx}px)`);
+    }
+    lane.style.backgroundImage = layers.join(', ');
+  },
+
+  applyGrid() {
+    for (const lane of document.querySelectorAll('.lane')) this.styleGrid(lane);
+  },
+
+  updateZoomLabel() {
+    if (!this.els.zoomLabel) return;
+    const r = DAW.PPS / DAW.DEFAULT_PPS;
+    this.els.zoomLabel.textContent = (r >= 10 ? r.toFixed(0) : r.toFixed(r >= 1 ? 1 : 2)) + '×';
+    this.els.zoomLabel.title = `${Math.round(DAW.PPS)} px/秒`;
+  },
+
   timelineWidth() {
-    return Math.max(
-      DAW.timeToPx(DAW.projectDuration() + 30),
-      this.els.scroller.clientWidth - this.HEAD_W
-    );
+    // ズーム倍率によらず、末尾に必ず1画面分の余白を残す（クリップを終端より後ろへ置けるように）
+    const viewW = Math.max(200, this.els.scroller.clientWidth - this.HEAD_W);
+    return Math.max(DAW.timeToPx(DAW.projectDuration()) + viewW, viewW);
   },
 
   // ---- rendering ----
@@ -64,6 +227,8 @@ DAW.ui = {
       tracksEl.appendChild(this.buildTrackRow(track, i, width));
     });
     this.updateDropHint();
+    this.updateEditButtons();   // 選択が消えていたらボタンも無効に戻す
+    this.renderFxRack();        // ラックが開いていれば追従（undo でトラックが差し替わっても正しい実体を引く）
     this.drawRuler();
   },
 
@@ -81,10 +246,18 @@ DAW.ui = {
     lane.className = 'lane';
     lane.dataset.trackId = track.id;
     lane.style.width = width + 'px';
+    this.styleGrid(lane);
     lane.addEventListener('pointerdown', e => {
-      if (e.target !== lane) return;
-      DAW.audio.seek(DAW.pxToTime(e.offsetX));
+      if (e.target !== lane || e.button !== 0) return;   // 右クリックはメニュー側（シークしない）
+      DAW.audio.seek(DAW.snapTime(DAW.pxToTime(e.offsetX), e.altKey));
       this.selectClip(null);
+    });
+    // レーン空白部の右クリック: 貼り付けメニュー（貼り付け位置は右クリックした時刻）
+    lane.addEventListener('contextmenu', e => {
+      if (e.target !== lane) return;   // クリップ上はクリップ側のメニューが受ける
+      e.preventDefault();
+      e.stopPropagation();
+      this.openLaneMenu(e, track, DAW.snapTime(DAW.pxToTime(e.offsetX), e.altKey));
     });
     for (const clip of track.clips) {
       lane.appendChild(this.buildClip(clip, track, index));
@@ -104,6 +277,18 @@ DAW.ui = {
     name.className = 't-name';
     name.value = track.name;
     name.addEventListener('input', () => { track.name = name.value; });
+    name.addEventListener('change', () => DAW.history.commit());
+    const up = document.createElement('button');
+    up.className = 't-move';
+    up.textContent = '▲';
+    up.title = 'トラックを上へ';
+    up.addEventListener('click', () => this.moveTrack(track.id, -1));
+    const down = document.createElement('button');
+    down.className = 't-move';
+    down.textContent = '▼';
+    down.title = 'トラックを下へ';
+    down.addEventListener('click', () => this.moveTrack(track.id, 1));
+
     const del = document.createElement('button');
     del.className = 't-del';
     del.textContent = '×';
@@ -112,8 +297,9 @@ DAW.ui = {
       DAW.removeTrack(track.id);
       this.renderTracks();
       DAW.audio.reschedule();
+      DAW.history.commit();
     });
-    top.append(name, del);
+    top.append(name, up, down, del);
 
     // 音量・パン
     const vol = this.buildSlider('音量', 0, 1.5, 0.01, track.volume, v => {
@@ -136,6 +322,7 @@ DAW.ui = {
       track.muted = !track.muted;
       mute.classList.toggle('on', track.muted);
       DAW.audio.updateGains();
+      DAW.history.commit();
     });
     const solo = document.createElement('button');
     solo.className = 't-solo' + (track.solo ? ' on' : '');
@@ -145,6 +332,7 @@ DAW.ui = {
       track.solo = !track.solo;
       solo.classList.toggle('on', track.solo);
       DAW.audio.updateGains();
+      DAW.history.commit();
     });
     btns.append(mute, solo);
 
@@ -161,105 +349,236 @@ DAW.ui = {
     input.type = 'range';
     input.min = min; input.max = max; input.step = step; input.value = value;
     input.addEventListener('input', () => onInput(+input.value));
+    input.addEventListener('change', () => DAW.history.commit());
     wrap.append(span, input);
     return wrap;
   },
 
-  // ---- FX ----
+  // ---- FX（ラック）----
+  //
+  // トラックヘッドには「ラックを開くボタン + 使用中スロット数バッジ」だけを置き、
+  // クリックで FX ラックパネル（#fx-panel）を開く。ラックは常に 10 行
+  // [enable LED] [スロット名 or 空] [MIX ノブ] で、行クリックでそのプラグインの
+  // エディタ（共通ノブ群）を同パネル下部に展開する。
+  // パネルは既存の流儀どおり「開くたび作り直し・外側クリックで閉じる」。
+  // undo などでトラックが差し替わっても id で引き直す（renderTracks が再描画する）。
+
+  _fxRack: null,   // 開いているラック { trackId, x, y, editIndex }
 
   buildFxRow(track) {
     const row = document.createElement('div');
     row.className = 'fx-row';
-
-    const sel = document.createElement('select');
-    sel.className = 'fx-add';
-    sel.title = 'エフェクトを追加';
-    const ph = document.createElement('option');
-    ph.textContent = '＋FX';
-    ph.value = '';
-    sel.appendChild(ph);
-    for (const def of DAW.plugins.list()) {
-      const opt = document.createElement('option');
-      opt.value = def.id;
-      opt.textContent = def.name;
-      sel.appendChild(opt);
-    }
-    sel.addEventListener('change', async () => {
-      const def = DAW.plugins.get(sel.value);
-      if (!def) return;
-      track.effects.push({ pluginId: def.id, params: DAW.plugins.defaultParams(def) });
-      if (DAW.audio.ctx) {
-        if (def.prepare) await def.prepare(DAW.audio.ctx);
-        DAW.audio.rebuildTrackChain(track);
-      }
-      this.renderTracks();
-    });
-    row.appendChild(sel);
-
-    track.effects.forEach((fx, i) => {
-      const def = DAW.plugins.get(fx.pluginId);
-      if (!def) return;
-      const chip = document.createElement('span');
-      chip.className = 'fx-chip';
-      chip.textContent = def.name;
-      chip.title = def.name;
-      chip.addEventListener('click', () => this.openFxPanel(track, i, chip));
-      row.appendChild(chip);
-    });
+    const btn = document.createElement('button');
+    btn.className = 'fx-rack-btn';
+    btn.title = 'FX ラックを開く';
+    const lab = document.createElement('span');
+    lab.textContent = 'FX';
+    const badge = document.createElement('span');
+    badge.className = 'fx-badge' + (track.effects.length ? ' on' : '');
+    badge.textContent = `${track.effects.length}/${DAW.wrapper.MAX_SLOTS}`;
+    btn.append(lab, badge);
+    btn.addEventListener('click', () => this.openFxRack(track.id, btn));
+    row.appendChild(btn);
     return row;
   },
 
-  openFxPanel(track, fxIndex, anchor) {
+  openFxRack(trackId, anchor) {
+    const r = anchor.getBoundingClientRect();
+    this._fxRack = { trackId, x: r.left, y: r.bottom + 6, editIndex: null };
+    this.renderFxRack();
+  },
+
+  closeFxRack() {
+    const p = document.getElementById('fx-panel');
+    if (p) p.remove();
+    this._fxRack = null;
+  },
+
+  // ラックの再描画。track は毎回 id で引く（undo で実体が差し替わるため）
+  renderFxRack() {
+    const st = this._fxRack;
+    if (!st) return;
     const old = document.getElementById('fx-panel');
     if (old) old.remove();
-    const fx = track.effects[fxIndex];
-    const def = DAW.plugins.get(fx.pluginId);
-    if (!def) return;
+    const track = DAW.project.tracks.find(t => t.id === st.trackId);
+    if (!track) { this._fxRack = null; return; }
+    if (st.editIndex != null && !track.effects[st.editIndex]) st.editIndex = null;
 
     const panel = document.createElement('div');
     panel.id = 'fx-panel';
     const h = document.createElement('h3');
-    h.textContent = def.name;
+    h.textContent = `FX — ${track.name}`;
     panel.appendChild(h);
 
-    for (const p of def.params) {
-      const rowEl = document.createElement('div');
-      rowEl.className = 'fx-param';
-      const label = document.createElement('span');
-      label.textContent = p.label;
-      const input = document.createElement('input');
-      input.type = 'range';
-      input.min = p.min; input.max = p.max; input.step = p.step;
-      input.value = fx.params[p.key];
-      const val = document.createElement('span');
-      val.className = 'val';
-      val.textContent = (+fx.params[p.key]).toFixed(2);
-      input.addEventListener('input', () => {
-        const v = +input.value;
-        val.textContent = v.toFixed(2);
-        DAW.audio.setEffectParam(track, fxIndex, p.key, v);
+    const rows = document.createElement('div');
+    rows.className = 'fx-slots';
+    for (let i = 0; i < DAW.wrapper.MAX_SLOTS; i++) rows.appendChild(this.buildFxSlotRow(track, i));
+    panel.appendChild(rows);
+
+    if (st.editIndex != null) panel.appendChild(this.buildFxEditor(track, st.editIndex));
+
+    document.body.appendChild(panel);
+    panel.style.left = Math.max(4, Math.min(st.x, window.innerWidth - panel.offsetWidth - 10)) + 'px';
+    panel.style.top = Math.max(4, Math.min(st.y, window.innerHeight - panel.offsetHeight - 10)) + 'px';
+  },
+
+  buildFxSlotRow(track, i) {
+    const st = this._fxRack;
+    const fx = track.effects[i];
+    const def = fx && DAW.plugins.get(fx.pluginId);
+    const row = document.createElement('div');
+    row.className = 'fx-slot' + (fx ? '' : ' empty') + (st.editIndex === i ? ' editing' : '');
+
+    // enable LED。切替はライブノードへ即反映し、1クリック = undo 1エントリ
+    const led = document.createElement('button');
+    led.className = 'fx-led' + (fx && fx.enabled !== false ? ' on' : '');
+    led.title = 'スロットの有効/無効';
+    led.disabled = !fx;
+    led.addEventListener('click', e => {
+      e.stopPropagation();
+      if (!fx) return;
+      DAW.audio.setEffectEnabled(track, i, fx.enabled === false);
+      led.classList.toggle('on', fx.enabled !== false);
+      DAW.history.commit();
+    });
+
+    // スロット名。空スロットはクリックでプラグイン選択（既存の showMenu を流用）
+    const name = document.createElement('span');
+    name.className = 'fx-slot-name';
+    name.textContent = def ? def.name : (fx ? fx.pluginId : '---');
+    name.title = def ? `${def.name} のエディタを開閉` : 'クリックでプラグインを選択';
+    name.addEventListener('click', e => {
+      if (!fx) { this.openFxAddMenu(e, track); return; }
+      st.editIndex = st.editIndex === i ? null : i;
+      this.renderFxRack();
+    });
+    if (fx) {
+      name.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.showMenu(e.clientX, e.clientY, [
+          { label: 'このFXを削除', run: () => this.removeFxSlot(track, i) },
+        ]);
       });
-      rowEl.append(label, input, val);
-      panel.appendChild(rowEl);
+    }
+    row.append(led, name);
+
+    // MIX ノブ（wet）。set は音だけ / commit は pointerup で1回（undo 粒度は input/change と同じ）
+    if (fx) {
+      const knob = DAW.knob.create({
+        label: 'MIX',
+        size: 26,
+        range: { min: 0, max: 1, step: 0.01 },
+        def: 1,
+        get: () => (fx.wet == null ? 1 : fx.wet),
+        set: v => DAW.audio.setEffectWet(track, i, v),
+        commit: () => DAW.history.commit(),
+        format: v => Math.round(v * 100) + '%',
+      });
+      knob.classList.add('fx-mix');
+      knob.title = 'MIX（原音とのバランス）: ドラッグで変更 / ダブルクリックで100%';
+      row.appendChild(knob);
+    }
+    return row;
+  },
+
+  // 空スロットのクリック: プラグイン選択メニュー。effects は稠密配列なので追加は常に末尾へ
+  openFxAddMenu(e, track) {
+    if (track.effects.length >= DAW.wrapper.MAX_SLOTS) return;
+    this.showMenu(e.clientX, e.clientY, DAW.plugins.list().map(def => ({
+      label: def.name,
+      run: () => this.addFxSlot(track, def),
+    })));
+  },
+
+  async addFxSlot(track, def) {
+    if (track.effects.length >= DAW.wrapper.MAX_SLOTS) return;
+    track.effects.push({ pluginId: def.id, params: DAW.plugins.defaultParams(def), enabled: true, wet: 1 });
+    if (DAW.audio.ctx) {
+      if (def.prepare) await def.prepare(DAW.audio.ctx);
+      DAW.audio.rebuildTrackChain(track);
+    }
+    if (this._fxRack) this._fxRack.editIndex = track.effects.length - 1;
+    this.renderTracks();   // バッジ更新（ラックが開いていれば renderTracks 内で描き直す）
+    DAW.history.commit();
+  },
+
+  removeFxSlot(track, i) {
+    if (!track.effects[i]) return;
+    track.effects.splice(i, 1);
+    if (DAW.audio.ctx) DAW.audio.rebuildTrackChain(track);
+    if (this._fxRack) {
+      if (this._fxRack.editIndex === i) this._fxRack.editIndex = null;
+      else if (this._fxRack.editIndex > i) this._fxRack.editIndex--;
+    }
+    this.renderTracks();
+    DAW.history.commit();
+  },
+
+  // スロットのエディタ。def.buildUI があればそれを呼び、無ければ共通ノブを自動生成する。
+  // カスタムエディタ契約（フェーズ1では定義のみ。実装プラグインはまだ無い）:
+  //   def.buildUI(container, inst, host)
+  //     inst: ライブ再生中のインスタンス（未生成なら null）
+  //     host: { track, index, get(key), set(key,v)（音のみ）, commit(), formatValue(key,v) }
+  buildFxEditor(track, i) {
+    const fx = track.effects[i];
+    const def = DAW.plugins.get(fx.pluginId);
+    const box = document.createElement('div');
+    box.className = 'fx-editor';
+    if (!def) return box;
+    const title = document.createElement('h4');
+    title.textContent = def.name;
+    box.appendChild(title);
+
+    const host = {
+      track,
+      index: i,
+      get: key => fx.params[key],
+      set: (key, v) => DAW.audio.setEffectParam(track, i, key, v),
+      commit: () => DAW.history.commit(),
+      formatValue: (key, v) => DAW.wrapper.formatValue(def, key, v),
+    };
+    if (def.buildUI) {
+      const n = DAW.audio.trackNodes.get(track.id);
+      def.buildUI(box, (n && n.fx[i] && n.fx[i].inst) || null, host);
+    } else {
+      const knobs = document.createElement('div');
+      knobs.className = 'fx-knobs';
+      for (const p of def.params) {
+        knobs.appendChild(DAW.knob.create({
+          label: p.label,
+          size: 40,
+          range: { min: p.min, max: p.max, step: p.step, curve: p.curve },
+          def: p.default,
+          get: () => fx.params[p.key],
+          set: v => host.set(p.key, v),
+          commit: host.commit,
+          // ヒントバー・ノブ・値入力で必ず同じ文字列（wrapper.formatValue）を使う
+          format: v => DAW.wrapper.formatValue(def, p.key, v),
+        }));
+      }
+      box.appendChild(knobs);
     }
 
     const remove = document.createElement('button');
     remove.className = 'fx-remove';
     remove.textContent = 'このFXを削除';
-    remove.addEventListener('click', () => {
-      track.effects.splice(fxIndex, 1);
-      if (DAW.audio.ctx) DAW.audio.rebuildTrackChain(track);
-      panel.remove();
-      this.renderTracks();
-    });
-    panel.appendChild(remove);
+    remove.addEventListener('click', () => this.removeFxSlot(track, i));
+    box.appendChild(remove);
+    return box;
+  },
 
-    document.body.appendChild(panel);
-    const r = anchor.getBoundingClientRect();
-    const x = Math.min(r.left, window.innerWidth - 260);
-    const y = Math.min(r.bottom + 6, window.innerHeight - panel.offsetHeight - 10);
-    panel.style.left = Math.max(4, x) + 'px';
-    panel.style.top = Math.max(4, y) + 'px';
+  // ---- ヒントバー ----
+  // ノブの hover / ドラッグ中に「パラメータ名: 現在値（単位付き）」を出す。
+  // 文字列は wrapper.formatValue（ノブの format）と同一のものが渡ってくる。
+
+  setHint(text) {
+    const el = document.getElementById('hint-bar');
+    if (el) el.textContent = text || '';
+  },
+
+  clearHint() {
+    this.setHint('');
   },
 
   // ---- clips ----
@@ -287,6 +606,16 @@ DAW.ui = {
     hr.className = 'h-r';
     el.append(hl, hr);
 
+    // フェードハンドル（クリップ上辺の左右）。ドラッグでフェード長を決める
+    const fl = document.createElement('div');
+    fl.className = 'f-l';
+    fl.title = 'フェードイン';
+    const fr = document.createElement('div');
+    fr.className = 'f-r';
+    fr.title = 'フェードアウト';
+    el.append(fl, fr);
+    this.positionFadeHandles(el, clip);
+
     const x = document.createElement('div');
     x.className = 'clip-x';
     x.textContent = '×';
@@ -298,41 +627,184 @@ DAW.ui = {
       if (this.selectedClipId === clip.id) this.selectedClipId = null;
       this.renderTracks();
       DAW.audio.reschedule();
+      DAW.history.commit();
     });
     el.appendChild(x);
 
+    el._clip = clip;   // 再描画時の逆引き用（findClip の線形探索を避ける）
     el.addEventListener('pointerdown', e => this.startClipDrag(e, el, clip, track));
+    el.addEventListener('contextmenu', e => {
+      e.preventDefault();      // 既定メニューは出さない
+      e.stopPropagation();     // document 側の「他所での右クリックで閉じる」に届かせない
+      this.openClipMenu(e, clip);
+    });
     return el;
   },
 
+  positionFadeHandles(clipEl, clip) {
+    const fl = clipEl.querySelector('.f-l');
+    const fr = clipEl.querySelector('.f-r');
+    const { fi, fo } = DAW.audio.fadeLengths(clip, false);   // 音と同じクランプ規則を使う
+    if (fl) fl.style.left = DAW.timeToPx(fi) + 'px';
+    if (fr) fr.style.right = DAW.timeToPx(fo) + 'px';
+  },
+
+  // クリップの見た目を作り直さずに更新する（ドラッグ中に呼ぶ）
+  refreshClipEl(clipEl, clip) {
+    clipEl.style.left = DAW.timeToPx(clip.startTime) + 'px';
+    clipEl.style.width = Math.max(4, DAW.timeToPx(clip.duration)) + 'px';
+    this.positionFadeHandles(clipEl, clip);
+    const canvas = clipEl.querySelector('canvas');
+    if (canvas) this.drawClipWave(canvas, clip, DAW.timeToPx(clip.duration), 104);
+  },
+
+  // クリップの波形を描く。
+  //
+  // 画面に見えている範囲だけを実サイズで描く方式にしている。クリップ全体を1枚の canvas に
+  // 収めようとすると、高倍率では横幅が数万pxに達して上限で潰れ、波形がぼやける（拡大編集の役に立たない）。
+  // 可視部だけなら常に等倍で描けるうえ、長いクリップでも描画量が一定に収まる。
+  // 1枚のcanvasに収める上限（クリップ内 px）。これ以下ならクリップ全体を一度に描き、
+  // スクロールしても描き直さない。これを超える長大クリップだけ可視範囲＋余白を描く。
+  WAVE_FULL_PX: 4000,
+
   drawClipWave(canvas, clip, cssW, cssH) {
+    const sc = this.els.scroller;
+    const viewW = Math.max(1, sc.clientWidth - this.HEAD_W);
+    const clipLeft = DAW.timeToPx(clip.startTime);
+    // 画面外のクリップは描かない（クリップ数が多いプロジェクトでの描画量を抑える）
+    if (clipLeft + cssW < sc.scrollLeft || clipLeft > sc.scrollLeft + viewW) {
+      canvas.style.display = 'none';
+      canvas.width = 0;
+      canvas._pps = null;
+      return;
+    }
+    let x0, x1;
+    if (cssW <= this.WAVE_FULL_PX) {
+      x0 = 0;
+      x1 = cssW;
+    } else {
+      // 可視範囲の左右に半画面ぶんの余白を持たせ、少し動いた程度では描き直さないようにする
+      const margin = viewW / 2;
+      x0 = Math.max(0, Math.floor(sc.scrollLeft - clipLeft - margin));
+      x1 = Math.min(cssW, Math.ceil(sc.scrollLeft + viewW - clipLeft + margin));
+    }
+    if (x1 <= x0) {           // 画面外のクリップは描かない
+      canvas.style.display = 'none';
+      canvas.width = 0;
+      canvas._pps = null;
+      return;
+    }
+    // 既に「いま見えている範囲」を含めて描いてあるなら描き直さない。
+    // 余白ぶん先まで描いてあるので、少し動いた程度では再描画が発生しない。
+    if (canvas.width > 0 && canvas._pps === DAW.PPS && canvas._dur === clip.duration
+        && canvas._fi === (clip.fadeIn || 0) && canvas._fo === (clip.fadeOut || 0)
+        && canvas._off === clip.offset) {
+      const needFrom = Math.max(0, sc.scrollLeft - clipLeft);
+      const needTo = Math.min(cssW, sc.scrollLeft + viewW - clipLeft);
+      if (canvas._x0 <= needFrom && canvas._x1 >= needTo) return;
+    }
+    canvas.style.display = '';
+    canvas.style.left = x0 + 'px';
+    canvas.style.width = (x1 - x0) + 'px';
+
     const dpr = window.devicePixelRatio || 1;
-    const w = Math.max(1, Math.min(Math.round(cssW * dpr), 8000));
+    const w = Math.max(1, Math.min(Math.round((x1 - x0) * dpr), 8000));
     const h = Math.max(1, Math.round(cssH * dpr));
     canvas.width = w;
     canvas.height = h;
+    canvas._pps = DAW.PPS;
+    canvas._x0 = x0;
+    canvas._x1 = x1;
+    canvas._dur = clip.duration;
+    canvas._off = clip.offset;
+    canvas._fi = clip.fadeIn || 0;
+    canvas._fo = clip.fadeOut || 0;
     const g = canvas.getContext('2d');
     const peaks = DAW.peaks.get(clip.bufferId);
     const buf = DAW.buffers.get(clip.bufferId);
     if (!peaks || !buf) return;
+
     const B = DAW.PEAK_BUCKET;
     const sr = buf.sampleRate;
-    const startS = clip.offset * sr;
-    const spanS = clip.duration * sr;
-    g.fillStyle = 'rgba(255,255,255,0.75)';
     const nBuckets = peaks.length / 2;
+    const data = buf.getChannelData(0);
+    // クリップ内 px → 音声サンプル位置
+    const pxToSample = px => (clip.offset + (px / cssW) * clip.duration) * sr;
+
+    g.fillStyle = 'rgba(255,255,255,0.75)';
     for (let x = 0; x < w; x++) {
-      const b0 = Math.floor((startS + spanS * x / w) / B);
-      const b1 = Math.max(b0 + 1, Math.ceil((startS + spanS * (x + 1) / w) / B));
+      const s0 = pxToSample(x0 + (x / w) * (x1 - x0));
+      const s1 = pxToSample(x0 + ((x + 1) / w) * (x1 - x0));
       let mn = Infinity, mx = -Infinity;
-      for (let b = Math.max(0, b0); b < b1 && b < nBuckets; b++) {
-        if (peaks[b * 2] < mn) mn = peaks[b * 2];
-        if (peaks[b * 2 + 1] > mx) mx = peaks[b * 2 + 1];
+      if (s1 - s0 < B) {
+        // 1px が1バケット未満まで拡大されていれば、実サンプルを直接見る（ピークより正確）
+        const i0 = Math.max(0, Math.floor(s0));
+        const i1 = Math.min(data.length, Math.max(i0 + 1, Math.ceil(s1)));
+        for (let i = i0; i < i1; i++) {
+          const v = data[i];
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+        }
+      } else {
+        const b0 = Math.max(0, Math.floor(s0 / B));
+        const b1 = Math.min(nBuckets, Math.max(b0 + 1, Math.ceil(s1 / B)));
+        for (let b = b0; b < b1; b++) {
+          if (peaks[b * 2] < mn) mn = peaks[b * 2];
+          if (peaks[b * 2 + 1] > mx) mx = peaks[b * 2 + 1];
+        }
       }
       if (mn === Infinity) continue;
       const y0 = (1 - mx) * h / 2;
       const y1 = (1 - mn) * h / 2;
       g.fillRect(x, y0, 1, Math.max(1, y1 - y0));
+    }
+    this.drawFadeShape(g, clip, w, h, cssW, x0, x1);
+  },
+
+  // フェード区間を斜めに暗くして、境界に線を引く。
+  // canvas はクリップの可視部（クリップ内 px の x0..x1）だけを覆うので、その座標系に変換する。
+  drawFadeShape(g, clip, w, h, cssW, x0, x1) {
+    const scale = w / Math.max(1e-6, x1 - x0);           // クリップ内px → canvas px
+    const toX = px => (px - x0) * scale;
+    const lengths = DAW.audio.fadeLengths(clip, false);  // 音と同じクランプ規則を使う
+    const fiPx = lengths.fi / clip.duration * cssW;
+    const foPx = lengths.fo / clip.duration * cssW;
+    const fi = toX(fiPx);
+    const fo = foPx * scale;                            // canvas 上でのフェードアウト幅
+    const left = toX(0);
+    const right = toX(cssW);
+    g.fillStyle = 'rgba(0, 0, 0, 0.45)';
+    g.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+    g.lineWidth = Math.max(1, Math.round(h / 100));
+    if (fiPx > 1) {
+      g.beginPath(); g.moveTo(left, 0); g.lineTo(fi, 0); g.lineTo(left, h); g.closePath(); g.fill();
+      g.beginPath(); g.moveTo(left, h); g.lineTo(fi, 0); g.stroke();
+    }
+    if (foPx > 1) {
+      g.beginPath(); g.moveTo(right, 0); g.lineTo(right - fo, 0); g.lineTo(right, h); g.closePath(); g.fill();
+      g.beginPath(); g.moveTo(right - fo, 0); g.lineTo(right, h); g.stroke();
+    }
+  },
+
+  // スクロール・ズームで見える範囲が変わったら、可視部の波形を描き直す。
+  // スクロール中は毎フレーム呼ばれるので、クリップ数に対して線形に収まるようにする
+  // （要素からクリップを引くのに findClip を使うと O(クリップ数^2) になる）。
+  refreshVisibleWaves() {
+    const sc = this.els.scroller;
+    const from = sc.scrollLeft;
+    const to = from + (sc.clientWidth - this.HEAD_W);
+    for (const el of document.querySelectorAll('.clip')) {
+      const clip = el._clip;
+      if (!clip) continue;
+      const left = DAW.timeToPx(clip.startTime);
+      const right = left + DAW.timeToPx(clip.duration);
+      const canvas = el.firstElementChild;
+      if (right < from || left > to) {
+        // 画面外。既に隠してあるなら何もしない
+        if (canvas && canvas.width !== 0) { canvas.style.display = 'none'; canvas.width = 0; canvas._pps = null; }
+        continue;
+      }
+      if (canvas) this.drawClipWave(canvas, clip, DAW.timeToPx(clip.duration), 104);
     }
   },
 
@@ -343,6 +815,280 @@ DAW.ui = {
       const el = document.querySelector(`.clip[data-id="${id}"]`);
       if (el) el.classList.add('selected');
     }
+    this.updateEditButtons();
+  },
+
+  // ---- クリップ編集操作 ----
+  // キーボード（main.js）・右クリックメニュー・ツールバーの三者が全て同じ経路を通る。
+  // 状態を変える操作は最後に commit() を1回呼ぶので、どの入口でも undo 粒度は同じ。
+
+  // コピーは状態を変えないので履歴には積まれない
+  copySelectedClip() {
+    return this.selectedClipId ? DAW.copyClip(this.selectedClipId) : null;
+  },
+
+  // カット = コピーしてから削除（undo 1回で丸ごと戻る）
+  cutSelectedClip() {
+    if (!this.selectedClipId || !DAW.copyClip(this.selectedClipId)) return false;
+    return this.deleteSelectedClip();
+  },
+
+  deleteSelectedClip() {
+    if (!this.selectedClipId || !DAW.findClip(this.selectedClipId)) return false;
+    DAW.removeClip(this.selectedClipId);
+    this.selectedClipId = null;
+    this.renderTracks();
+    DAW.audio.reschedule();
+    DAW.history.commit();
+    return true;
+  },
+
+  // 分割は常に再生ヘッド位置（S キー・分割ボタン・右クリックメニューで共通）
+  splitSelectedClip() {
+    if (!this.selectedClipId || !DAW.splitClip(this.selectedClipId, DAW.audio.getPos())) return false;
+    this.renderTracks();
+    DAW.audio.reschedule();
+    DAW.history.commit();
+    return true;
+  },
+
+  // 再生ヘッドがこのクリップを分割できる位置にあるか（splitClip と同じ端の判定）
+  canSplitAtPlayhead(clip) {
+    const pos = DAW.audio.getPos();
+    return pos > clip.startTime + DAW.SPLIT_MIN && pos < clip.startTime + clip.duration - DAW.SPLIT_MIN;
+  },
+
+  pasteClipAt(time, trackId) {
+    const clip = DAW.pasteClip(time, trackId);
+    if (!clip) return null;
+    this.renderTracks();
+    this.selectClip(clip.id);
+    DAW.audio.reschedule();
+    DAW.history.commit();
+    return clip;
+  },
+
+  duplicateSelectedClip() {
+    const copy = this.selectedClipId && DAW.duplicateClip(this.selectedClipId);
+    if (!copy) return null;
+    this.renderTracks();
+    this.selectClip(copy.id);
+    DAW.audio.reschedule();
+    DAW.history.commit();
+    return copy;
+  },
+
+  // ツールバーの編集ボタンはクリップ選択中だけ押せる
+  updateEditButtons() {
+    if (!this.els.btnCut) return;
+    const on = !!(this.selectedClipId && DAW.findClip(this.selectedClipId));
+    this.els.btnCut.disabled = !on;
+    this.els.btnSplit.disabled = !on;
+    this.els.btnClipDel.disabled = !on;
+  },
+
+  // ---- 右クリックメニュー ----
+
+  closeMenu() {
+    const m = document.getElementById('ctx-menu');
+    if (m) m.remove();
+  },
+
+  // items: { label, key, disabled, run } の配列。メニューは常に1個だけ（開き直しで前を閉じる）。
+  // 閉じる仕掛け（外側クリック / Escape / スクロール / 他所での右クリック）は init で張ってある。
+  showMenu(x, y, items) {
+    this.closeMenu();
+    const menu = document.createElement('div');
+    menu.id = 'ctx-menu';
+    menu.addEventListener('contextmenu', e => e.preventDefault());   // メニュー上の右クリックは無視
+    for (const it of items) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'ctx-item';
+      row.disabled = !!it.disabled;
+      const lab = document.createElement('span');
+      lab.textContent = it.label;
+      const key = document.createElement('span');
+      key.className = 'ctx-key';
+      key.textContent = it.key || '';
+      row.append(lab, key);
+      row.addEventListener('click', () => {
+        this.closeMenu();
+        it.run();
+      });
+      menu.appendChild(row);
+    }
+    document.body.appendChild(menu);
+    // 画面端では内側に補正する（fx-panel と同じ流儀）
+    const r = menu.getBoundingClientRect();
+    menu.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 4)) + 'px';
+    menu.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 4)) + 'px';
+    return menu;
+  },
+
+  // クリップの右クリック。分割は再生ヘッド位置（S キーと同じ）。ヘッドがクリップ外なら無効表示。
+  openClipMenu(e, clip) {
+    this.selectClip(clip.id);
+    this.showMenu(e.clientX, e.clientY, [
+      { label: 'カット', key: 'Ctrl+X', run: () => this.cutSelectedClip() },
+      { label: 'コピー', key: 'Ctrl+C', run: () => this.copySelectedClip() },
+      { label: '複製', key: 'Ctrl+D', run: () => this.duplicateSelectedClip() },
+      { label: '再生ヘッド位置で分割', key: 'S', disabled: !this.canSplitAtPlayhead(clip),
+        run: () => this.splitSelectedClip() },
+      // ステム分離は1件ずつ（Worker がメモリを大量に使うため）。実行中は無効表示
+      { label: 'ステム分離', disabled: !!DAW.stems.running,
+        run: () => this.separateClipStems(clip.id) },
+      { label: '削除', key: 'Delete', run: () => this.deleteSelectedClip() },
+    ]);
+  },
+
+  // ---- ステム分離（AI で drums / bass / other / vocals の4トラックに分ける）----
+
+  // 進捗ダイアログ（モーダル）。実行中はこれ以外の操作をブロックする。
+  openStemsDialog(title) {
+    this.closeStemsDialog();
+    const overlay = document.createElement('div');
+    overlay.id = 'stems-modal';
+    const box = document.createElement('div');
+    box.className = 'stems-box';
+    const h = document.createElement('h3');
+    h.textContent = 'ステム分離';
+    const msg = document.createElement('div');
+    msg.className = 'stems-msg';
+    msg.textContent = `${title}: 準備中…`;
+    const bar = document.createElement('div');
+    bar.className = 'stems-bar';
+    const fill = document.createElement('i');
+    bar.appendChild(fill);
+    const count = document.createElement('div');
+    count.className = 'stems-count';
+    count.textContent = '';
+    const btn = document.createElement('button');
+    btn.className = 'stems-cancel';
+    btn.textContent = 'キャンセル';
+    btn.addEventListener('click', () => {
+      if (DAW.stems.running) {
+        btn.disabled = true;   // 二度押し防止。後始末は separate の reject 側で行う
+        DAW.stems.cancel();
+      } else {
+        this.closeStemsDialog();   // エラー表示状態では「閉じる」として働く
+      }
+    });
+    box.append(h, msg, bar, count, btn);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    return { overlay, msg, fill, count, btn, title };
+  },
+
+  // バックエンド確定時の表示（Python サイドカーが居れば高速処理の旨を出す）
+  setStemsBackend(dlg, backend) {
+    if (!dlg) return;
+    dlg.backendLabel = backend === 'python' ? 'Python 高速処理' : 'ブラウザ内処理';
+    if (document.getElementById('stems-modal')) {
+      dlg.msg.textContent = `${dlg.title}: 分離中…（${dlg.backendLabel}）`;
+    }
+  },
+
+  updateStemsDialog(dlg, p) {
+    if (!dlg || !document.getElementById('stems-modal')) return;
+    if (p.phase === 'load') {
+      dlg.msg.textContent = `${dlg.title}: モデル読み込み中…`;
+      dlg.fill.style.width = '0%';
+      dlg.count.textContent = `${p.done} / ${p.total} ファイル`;
+    } else {
+      const pct = p.total > 0 ? Math.round(p.done / p.total * 100) : 0;
+      dlg.msg.textContent = `${dlg.title}: 分離中…` + (dlg.backendLabel ? `（${dlg.backendLabel}）` : '');
+      dlg.fill.style.width = pct + '%';
+      // python サイドカーはセグメント数を持たない（% のみ）ので表記を分ける
+      dlg.count.textContent = p.unit === 'percent' ? `${pct}%` : `セグメント ${p.done} / ${p.total}（${pct}%）`;
+    }
+  },
+
+  // エラーはダイアログ内に表示して「閉じる」で消してもらう（黙って閉じない）
+  showStemsError(dlg, err) {
+    if (!dlg || !document.getElementById('stems-modal')) return;
+    dlg.msg.textContent = (err && err.message) || String(err);
+    dlg.msg.classList.add('stems-err');
+    dlg.count.textContent = '';
+    dlg.btn.textContent = '閉じる';
+    dlg.btn.disabled = false;
+  },
+
+  closeStemsDialog() {
+    const m = document.getElementById('stems-modal');
+    if (m) m.remove();
+  },
+
+  // クリップを4ステムに分離して、元トラックの直下へ4トラックとして並べる。
+  // 元クリップはそのまま残す。実行は一度に1件だけ（DAW.stems.running が防ぐ）。
+  async separateClipStems(clipId) {
+    if (DAW.stems.running) return false;
+    const found = DAW.findClip(clipId);
+    if (!found) return false;
+    const clip = found.clip;
+    const buffer = DAW.buffers.get(clip.bufferId);
+    if (!buffer) return false;
+    // 実行中にクリップが動かされた場合に備えて必要な値を控えておく
+    const snap = { trackId: found.track.id, name: clip.name, startTime: clip.startTime };
+    const dlg = this.openStemsDialog(clip.name);
+    try {
+      const stems = await DAW.stems.separate(buffer, {
+        offset: clip.offset,
+        duration: clip.duration,
+        onBackend: b => this.setStemsBackend(dlg, b),
+        onProgress: p => this.updateStemsDialog(dlg, p),
+      });
+      const cur = DAW.findClip(clipId);   // 分離中の移動・削除に追従（消えていたら控えの値）
+      const at = cur || { track: { id: snap.trackId }, clip: snap };
+      this.placeStemTracks(at.track.id, at.clip.name != null ? at.clip : snap, stems);
+      this.closeStemsDialog();
+      return true;
+    } catch (err) {
+      if (err && err.code === 'cancelled') {
+        this.closeStemsDialog();
+      } else {
+        this.showStemsError(dlg, err);
+      }
+      return false;
+    }
+  },
+
+  // 4ステムを新規4トラックとして sourceTrackId の直下に挿し、クリップを同じ startTime に置く。
+  // 履歴は最後に commit 1回だけ（undo 1発で4トラックまとめて消える）。
+  placeStemTracks(sourceTrackId, clipInfo, stems) {
+    let idx = DAW.project.tracks.findIndex(t => t.id === sourceTrackId);
+    if (idx < 0) idx = DAW.project.tracks.length - 1;   // 元トラックが消されていたら末尾へ
+    const made = [];
+    DAW.stems.TRACKS.forEach((key, k) => {
+      const buf = stems[key];
+      const name = `${clipInfo.name} ${DAW.stems.STEM_LABELS[key]}`;
+      const track = {
+        id: DAW.uid(), name, volume: 1, pan: 0, muted: false, solo: false,
+        effects: [], clips: [],
+      };
+      track.clips.push({
+        id: DAW.uid(),
+        bufferId: DAW.registerBuffer(buf),
+        startTime: Math.max(0, clipInfo.startTime),
+        offset: 0,
+        duration: buf.duration,
+        name,
+      });
+      DAW.project.tracks.splice(idx + 1 + k, 0, track);
+      made.push(track);
+    });
+    this.renderTracks();
+    DAW.audio.reschedule();
+    DAW.history.commit();
+    return made;
+  },
+
+  // レーン空白部の右クリック。貼り付け先は右クリックしたレーンのトラックと時刻。
+  openLaneMenu(e, track, t) {
+    this.showMenu(e.clientX, e.clientY, [
+      { label: '貼り付け', key: 'Ctrl+V', disabled: !DAW.clipboard,
+        run: () => this.pasteClipAt(t, track.id) },
+    ]);
   },
 
   laneAtY(clientY) {
@@ -358,11 +1104,17 @@ DAW.ui = {
     e.stopPropagation();
     this.selectClip(clip.id);
 
-    const zone = e.target.classList.contains('h-l') ? 'l'
-      : e.target.classList.contains('h-r') ? 'r' : 'move';
+    const cl = e.target.classList;
+    const zone = cl.contains('f-l') ? 'fi'
+      : cl.contains('f-r') ? 'fo'
+      : cl.contains('h-l') ? 'l'
+      : cl.contains('h-r') ? 'r' : 'move';
     const startX = e.clientX;
     const startY = e.clientY;
-    const orig = { start: clip.startTime, offset: clip.offset, dur: clip.duration };
+    const orig = {
+      start: clip.startTime, offset: clip.offset, dur: clip.duration,
+      fadeIn: clip.fadeIn || 0, fadeOut: clip.fadeOut || 0,
+    };
     const buf = DAW.buffers.get(clip.bufferId);
     let moved = false;
     let targetTrackId = track.id;
@@ -380,8 +1132,14 @@ DAW.ui = {
       if (!moved && Math.abs(ev.clientX - startX) < 3 && Math.abs(ev.clientY - startY) < 3) return;
       moved = true;
       const dt = DAW.pxToTime(ev.clientX - startX);
-      if (zone === 'move') {
-        curStart = Math.max(0, orig.start + dt);
+      if (zone === 'fi' || zone === 'fo') {
+        // フェードは最大でもクリップ長の半分まで（再生側の上限と揃える）
+        const max = clip.duration / 2;
+        const v = zone === 'fi' ? orig.fadeIn + dt : orig.fadeOut - dt;
+        clip[zone === 'fi' ? 'fadeIn' : 'fadeOut'] = Math.max(0, Math.min(max, v));
+        this.refreshClipEl(clipEl, clip);
+      } else if (zone === 'move') {
+        curStart = Math.max(0, DAW.snapTime(orig.start + dt, ev.altKey));
         clipEl.style.left = DAW.timeToPx(curStart) + 'px';
         const lane = this.laneAtY(ev.clientY);
         if (lane) {
@@ -389,16 +1147,19 @@ DAW.ui = {
           setHighlight(lane.dataset.trackId !== track.id ? lane : null);
         }
       } else if (zone === 'l') {
-        const d = Math.min(orig.dur - 0.05, Math.max(-orig.offset, -orig.start, dt));
+        const snapped = DAW.snapTime(orig.start + dt, ev.altKey) - orig.start;
+        const d = Math.min(orig.dur - 0.05, Math.max(-orig.offset, -orig.start, snapped));
         clip.startTime = orig.start + d;
         clip.offset = orig.offset + d;
         clip.duration = orig.dur - d;
-        clipEl.style.left = DAW.timeToPx(clip.startTime) + 'px';
-        clipEl.style.width = Math.max(4, DAW.timeToPx(clip.duration)) + 'px';
+        DAW.clampFades(clip);
+        this.refreshClipEl(clipEl, clip);
       } else {
         const maxDur = buf ? buf.duration - orig.offset : orig.dur;
-        clip.duration = Math.min(maxDur, Math.max(0.05, orig.dur + dt));
-        clipEl.style.width = Math.max(4, DAW.timeToPx(clip.duration)) + 'px';
+        const end = DAW.snapTime(orig.start + orig.dur + dt, ev.altKey);
+        clip.duration = Math.min(maxDur, Math.max(0.05, end - orig.start));
+        DAW.clampFades(clip);
+        this.refreshClipEl(clipEl, clip);
       }
     };
 
@@ -419,6 +1180,7 @@ DAW.ui = {
       }
       this.renderTracks();
       DAW.audio.reschedule();
+      DAW.history.commit();
     };
 
     clipEl.setPointerCapture(e.pointerId);
@@ -451,6 +1213,7 @@ DAW.ui = {
     }
     this.renderTracks();
     DAW.audio.reschedule();
+    DAW.history.commit();
   },
 
   isAudioFile(f) {
@@ -459,6 +1222,13 @@ DAW.ui = {
 
   async onDrop(e) {
     e.preventDefault();
+    // ステム分離モデル（htdemucs_embedded.onnx）のドロップ。models/ 未配置環境向けの搬入経路
+    const onnx = [...e.dataTransfer.files].find(f => /\.onnx$/i.test(f.name));
+    if (onnx) {
+      DAW.stems.setModelData(await onnx.arrayBuffer());
+      alert(`ステム分離モデルを読み込みました: ${onnx.name}`);
+      return;
+    }
     const files = [...e.dataTransfer.files].filter(f => this.isAudioFile(f));
     if (!files.length) return;
     const laneEl = e.target.closest('.lane');
@@ -476,17 +1246,130 @@ DAW.ui = {
 
   // ---- transport / playhead ----
 
+  // ---- レベルメーター ----
+
+  METER_FLOOR: -60,   // メーター左端の dBFS
+  METER_DECAY: 0.94,  // 1フレームあたりの減衰係数
+  meterPeak: [0, 0],  // 表示用（立ち上がり即時・減衰はゆっくり）
+  clipped: false,
+
+  resetClip() {
+    this.clipped = false;
+    this.els.meterClip.classList.remove('on');
+  },
+
+  meterPct(peak) {
+    if (peak <= 0) return 0;
+    const db = 20 * Math.log10(peak);
+    return Math.max(0, Math.min(100, (1 - db / this.METER_FLOOR) * 100));
+  },
+
+  updateMeter() {
+    const lv = DAW.audio.getLevels();
+    // ピークメーターの標準的な挙動: 立ち上がり即時・戻りは緩やか（約 -32dB/秒）
+    for (let i = 0; i < 2; i++) this.meterPeak[i] = Math.max(lv[i], this.meterPeak[i] * this.METER_DECAY);
+    this.els.meterL.style.width = this.meterPct(this.meterPeak[0]) + '%';
+    this.els.meterR.style.width = this.meterPct(this.meterPeak[1]) + '%';
+    const p = Math.max(this.meterPeak[0], this.meterPeak[1]);
+    this.els.meterDb.textContent = p > 0 ? (20 * Math.log10(p)).toFixed(1) : '-∞';
+    if (lv[0] >= 1 || lv[1] >= 1) {
+      this.clipped = true;
+      this.els.meterClip.classList.add('on');
+    }
+  },
+
+  // ループ再生の切り替え。区間が未設定ならプロジェクト全体をループ区間にする。
+  toggleLoop() {
+    DAW.loop.enabled = !DAW.loop.enabled;
+    if (DAW.loop.enabled && DAW.loop.end - DAW.loop.start <= 0.05) {
+      DAW.setLoop(0, DAW.projectDuration());
+    }
+    this.els.btnLoop.classList.toggle('on', DAW.loop.enabled);
+    this.updateExportLabel();
+    this.drawRuler();
+    DAW.audio.reschedule();
+  },
+
+  // ループ有効時は書き出し対象が区間だけになるので、ボタンにそれを出す（黙って変わらないように）
+  updateExportLabel() {
+    if (this.els.btnExport) {
+      this.els.btnExport.textContent = DAW.activeLoop() ? 'WAV書き出し（ループ区間）' : 'WAV書き出し';
+    }
+  },
+
+  // ルーラーの Shift+ドラッグでループ区間を決める
+  startLoopDrag(e, from) {
+    const ruler = this.els.ruler;
+    const at = ev => DAW.pxToTime(this.els.scroller.scrollLeft + ev.offsetX);
+    const move = ev => {
+      DAW.setLoop(DAW.snapTime(from, ev.altKey), DAW.snapTime(at(ev), ev.altKey));
+      this.drawRuler();
+    };
+    const up = () => {
+      ruler.removeEventListener('pointermove', move);
+      if (DAW.loop.end - DAW.loop.start > 0.05) {
+        DAW.loop.enabled = true;
+        this.els.btnLoop.classList.add('on');
+        this.updateExportLabel();
+        DAW.audio.reschedule();
+      }
+      this.drawRuler();
+    };
+    ruler.setPointerCapture(e.pointerId);
+    ruler.addEventListener('pointermove', move);
+    ruler.addEventListener('pointerup', up, { once: true });
+    ruler.addEventListener('pointercancel', up, { once: true });
+  },
+
+  // メトロノームの切り替え。再生中なら即座に反映されるよう組み直す。
+  toggleMetronome() {
+    DAW.metronome.enabled = !DAW.metronome.enabled;
+    this.els.btnMetro.classList.toggle('on', DAW.metronome.enabled);
+    DAW.audio.reschedule();
+  },
+
+  // 録音の開始/停止。停止時に録れたトラックへスクロールして選択状態にする。
+  async toggleRecord() {
+    if (DAW.record.active) {
+      const track = await DAW.record.stop();
+      this.els.btnRecord.classList.remove('on');
+      DAW.audio.pause();
+      this.renderTracks();
+      this.updatePlayButton();
+      if (track) {
+        const clip = track.clips[0];
+        this.selectClip(clip.id);
+        DAW.history.commit();
+      } else {
+        alert('録音データがありませんでした');
+      }
+      return;
+    }
+    this.els.btnRecord.classList.add('on');
+    const started = await DAW.record.start();
+    if (!started) {
+      this.els.btnRecord.classList.remove('on');
+      return;
+    }
+    this.updatePlayButton();
+  },
+
   updatePlayButton() {
     this.els.btnPlay.textContent = DAW.audio.playing ? '⏸' : '▶';
   },
 
   tick() {
+    this.updateMeter();
     const pos = DAW.audio.getPos();
-    this.els.playhead.style.transform = `translateX(${this.HEAD_W + DAW.timeToPx(pos)}px)`;
-    this.els.time.textContent = this.fmtTime(pos);
+    // 表示はリミッターの先読みぶん戻した位置にする（聞こえている音と画面を合わせる）
+    const shown = DAW.audio.displayPos();
+    this.els.playhead.style.transform = `translateX(${this.HEAD_W + DAW.timeToPx(shown)}px)`;
+    this.els.time.textContent = this.fmtTime(shown);
     if (DAW.audio.playing) {
       const dur = DAW.projectDuration();
-      if (dur > 0 && pos >= dur) {
+      // ループ中は終端で止めない（ループ区間がプロジェクト終端を越えていても
+      // エンジン側は繰り返しを予約済み。ここで pause すると先回りで殺してしまう）
+      if (dur > 0 && pos >= dur && !DAW.activeLoop()) {
         DAW.audio.pause();
         this.updatePlayButton();
       }
@@ -515,20 +1398,49 @@ DAW.ui = {
     g.scale(dpr, dpr);
     g.clearRect(0, 0, cssW, cssH);
     const sl = sc.scrollLeft;
-    const t0 = Math.floor(sl / DAW.PPS);
-    const t1 = Math.ceil((sl + cssW) / DAW.PPS);
+
+    // ループ区間を帯で示す（無効時は灰色で「設定はあるが効いていない」ことを示す）
+    if (DAW.loop.end - DAW.loop.start > 0) {
+      const lx = DAW.timeToPx(DAW.loop.start) - sl;
+      const lw = DAW.timeToPx(DAW.loop.end - DAW.loop.start);
+      g.fillStyle = DAW.loop.enabled ? 'rgba(79, 140, 255, 0.28)' : 'rgba(139, 139, 153, 0.16)';
+      g.fillRect(lx, 0, lw, cssH);
+      g.fillStyle = DAW.loop.enabled ? '#4f8cff' : '#8b8b99';
+      g.fillRect(lx, 0, 2, cssH);
+      g.fillRect(lx + lw - 2, 0, 2, cssH);
+    }
+
     g.fillStyle = '#8b8b99';
     g.font = '10px Consolas, monospace';
     g.textBaseline = 'top';
-    for (let t = Math.max(0, t0); t <= t1; t++) {
-      const x = t * DAW.PPS - sl;
-      const major = t % 5 === 0;
-      g.fillRect(x, major ? 12 : 20, 1, major ? 15 : 7);
-      if (major) {
-        const m = Math.floor(t / 60);
-        const s = t % 60;
-        g.fillText(`${m}:${String(s).padStart(2, '0')}`, x + 3, 2);
+
+    // ズーム倍率に応じてラベル間隔（最低64px）と補助目盛り（最低7px）を選ぶ
+    const major = this.RULER_STEPS.find(s2 => DAW.timeToPx(s2) >= 64) || this.RULER_STEPS[this.RULER_STEPS.length - 1];
+    const minor = this.RULER_STEPS.find(s2 => s2 <= major / 2 && DAW.timeToPx(s2) >= 7 && (major / s2) % 1 === 0);
+
+    const tEnd = DAW.pxToTime(sl + cssW);
+    if (minor) {
+      for (let i = Math.max(0, Math.floor(DAW.pxToTime(sl) / minor)); i * minor <= tEnd; i++) {
+        const t = i * minor;
+        if (Math.abs(t / major - Math.round(t / major)) < 1e-9) continue;
+        g.fillRect(Math.round(DAW.timeToPx(t) - sl), 20, 1, 7);
       }
     }
+    for (let i = Math.max(0, Math.floor(DAW.pxToTime(sl) / major)); i * major <= tEnd; i++) {
+      const t = i * major;
+      const x = Math.round(DAW.timeToPx(t) - sl);
+      g.fillRect(x, 12, 1, 15);
+      g.fillText(this.fmtRuler(t, major), x + 3, 2);
+    }
+  },
+
+  // ラベル間隔の候補（秒）。1分未満は 60 を割り切れる値だけを使う
+  RULER_STEPS: [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800],
+
+  fmtRuler(t, step) {
+    const m = Math.floor(t / 60);
+    const s = t - m * 60;
+    const dec = step >= 1 ? 0 : (step >= 0.1 ? 1 : 2);
+    return `${m}:${s.toFixed(dec).padStart(dec ? 3 + dec : 2, '0')}`;
   },
 };
