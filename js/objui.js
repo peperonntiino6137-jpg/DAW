@@ -194,6 +194,11 @@ DAW.objui = {
     const free = DAW.project.tracks.find(t => !used.has(t.id));
     const obj = DAW.objects.create(null, free ? free.id : null);
     if (!obj) return null;
+    // UI から作るオブジェクトは width=100（±45°）を初期値にする。モデル既定の 0 だと
+    // ステレオ素材が (L+R)/2 のモノラル1点に畳まれ、「繋いだら元のステレオより平坦」
+    // という体験になるため（モノラル素材は widthGain の正規化で音量が変わらず無害）。
+    // ADM 準拠の既定値そのもの（objects.defaults()）は変えない。
+    DAW.objects.set(obj.id, 'width', 100);
     DAW.objects.select(obj.id);
     this.render();
     DAW.history.commit();
