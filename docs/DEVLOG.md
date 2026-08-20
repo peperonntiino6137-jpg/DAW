@@ -756,3 +756,75 @@ numpy を依存宣言していないため `pip install demucs numpy` と**両�
 キャンセル / 499・500・409・ネットワーク断のエラー表示 / UI 完了経路（4 トラック配置・undo 1 回）
 をカバー。S.33 は実サーバが居ても壊れないよう `backend:'onnx'` を明示するようにした。
 DAW.exe（build-exe.ps1）へは同梱しない（開発者向けオプション）。
+
+## FL 流エフェクトホスト フェーズ1（`js/wrapper.js` / `js/knob.js` / FXラック UI・2026-08-20）
+
+スロット enable/wet・共通ノブ・FXラック・ヒントバーを実装した（PDC 配線・send/サイドチェイン・
+モジュレータ・可視化はフェーズ2/3）。1089/1089 passed（--bench 込み。既定スイートは 1057/1057）。
+
+### 移行アダプタ方式を採った理由（全面書き換えの却下）
+
+既存プラグイン契約（`DAW.plugins.register` / `create(ctx,params)→{input,output,set}`）は一切変えず、
+ホスト所有の Gain ノードで外側から包む `DAW.wrapper.createSlot()` を新設した。契約を変える全面
+書き換えは、既存 6 プラグイン + テスト群（def.create 直呼び）を同時に書き換えるリスクに対して
+得るものが無い。スロットは旧インスタンスと同じ `input/output/set` を持つので、
+`removeTrackNodes` 等の後始末コードも無傷。`connectChain` はシグネチャ・呼び出し3箇所を変えずに
+中身だけ `wrapper.buildChain` へ委譲した。
+
+### スロットグラフと線形クロスフェード（等パワーの却下）
+
+`slotIn(Gain) ─┬─ dryGain(1-wet) ─┐ / └─ inst → wetGain(wet) ─┴→ slotOut(Gain)`。
+dry と wet は同一信号由来（相関）なので**線形和（dry=1-w, wet=w）が振幅一定**。等パワー（√w）は
+無相関信号用で、相関信号では中間に約+3dBの山が出るため却下。切替・ドラッグは
+setTargetAtTime（時定数10ms）でクリック防止。**構築時（オフライン書き出し含む）は値を直接入れる**
+（ランプの過渡が書き出しに混ざらない）。テストは wet=0/0.5/1・enable=false を WAV バイト列一致 /
+サンプル単位の線形合成で固定した（F.2〜F.7）。
+
+### enable の非破棄・latency・互換方針
+
+- enable=false は `slotIn→inst.input` の切断 + dry=1。**インスタンスは破棄しない**（再 enable 即時、
+  リバーブの尾・コンプの状態も残る）。ライブの切断は wet ランプが落ちてから（60ms 後）行い、
+  切断そのものの段差を出さない。
+- インスタンス契約に `latencySamples`（任意・既定0）を追加。latency>0 のスロットは dry 枝に同量の
+  DelayNode（コム防止）。トラック間 PDC は**読み取り（`chainLatency`、enable 中のみ合算）まで**。
+- スロットデータは track.effects への**追加フィールドのみ** `{enabled(省略時true), wet(省略時1)}`。
+  保存は version:1 据え置き。loadProject のデフォルトマージで補完するので旧ファイルは従来出力と
+  サンプル一致（F.6）。
+- パラメータ記述子の任意拡張 `{unit, digits, curve:'lin'|'log', format}` と
+  `norm/denorm/formatValue`（"8,000 Hz" 形式・log は step へ量子化して往復一致）を wrapper に集約。
+
+### 共通ノブ（js/knob.js）
+
+objui のリミッターノブ（canvas・縦ドラッグ KNOB_PX=170・ダブルクリック既定値・pointer capture
+try/catch・move/up は window で受ける）を `DAW.knob.create()` に汎用化し、リミッターノブを乗せ替えた
+（tests-objui2 の W.30〜W.38 は無変更で通る = 挙動互換）。追加挙動: **Ctrl 微調整（Shift も互換・
+0.2倍）** / ホイール1ステップ（Ctrl で 0.2 ステップ）/ 右クリック→ui.showMenu 流用で
+「値を入力…（body 直下のインライン input。blur 確定・再入ガード）」「デフォルトに戻す」
+「オートメーション化 / リンク…（disabled でフェーズ2/3 予告）」。undo 粒度は set（音のみ）/
+commit（pointerup で1回）の分離で、既存の input/change 分離と同じ。ドラッグは正規化空間で
+動かすので log カーブも自然な効きになる。
+
+### FXラック UI とヒントバー
+
+- fx-chip 列を廃止し「FX ボタン + 使用中スロット数バッジ」に置換。ラック（#fx-panel）は常に10行
+  `[enable LED] [スロット名 or 空(クリックで showMenu のプラグイン選択)] [MIX ノブ]`、行クリックで
+  下部にエディタ（共通ノブ自動生成 or `def.buildUI(container, inst, host)`。契約定義のみ、実装
+  プラグインはまだ無い）。「開くたび作り直し・外側クリックで閉じる」を踏襲しつつ、右クリック
+  メニューとインライン入力は閉じる対象から除外。**undo でトラック実体が差し替わるため、ラックは
+  trackId で引き直し、renderTracks から再描画して追従する**（F.49 が固定）。
+- `#hint-bar`（最下部固定）+ `DAW.ui.setHint/clearHint`。ノブの hover/drag 中は
+  「パラメータ名: 現在値」を wrapper.formatValue と同一文字列で表示。
+
+### 設計からの逸脱（最小限）
+
+- `DAW.audio.setEffectEnabled / setEffectWet` を追加（設計の wrapper API 一覧には無いが、UI から
+  state+ライブノードへ届く経路が必要で、既存 setEffectParam と同じ形に揃えた。逸脱ではなく補完）。
+
+### 検証
+
+`test/tests-wrapper.js`（グループ [39]・57項目）: enable=false / wet=0 が dry と**バイト列一致**、
+wet=0.5/1 の線形合成、旧形式互換、exportMix 反映、latencySamples/chainLatency、undo/redo、
+10スロット上限、norm/denorm（log 往復・クランプ）、formatValue、ノブ（ドラッグ/Ctrl/Shift/
+ホイール/ダブルクリック/右クリックメニュー/値入力/ヒントバー/update）、ラック UI 一式。
+ベンチ（--bench）に「FXラッパー 20tr×10slot」を追加: ライブチェーン構築 200 スロット 34ms、
+書き出し 200 スロット経由で実時間の 1.6 倍速（lowpass×200 の処理コストが支配的）。

@@ -220,35 +220,27 @@ input[type="range"] { accent-color: var(--accent); }
 .t-mute.on { background: #b3452e; border-color: #b3452e; color: #fff; }
 .t-solo.on { background: #b3922e; border-color: #b3922e; color: #fff; }
 
-/* FX */
+/* FX（ラック）。トラックヘッドには開くボタン + 使用中スロット数バッジだけを置く */
 .fx-row { display: flex; gap: 4px; align-items: center; overflow: hidden; }
-.fx-add {
-  background: var(--panel2);
-  color: var(--dim);
-  border: 1px solid var(--border);
-  border-radius: 3px;
+.fx-rack-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
   font-size: 11px;
-  padding: 1px 2px;
-  max-width: 52px;
-}
-.fx-chip {
   background: #3a3450;
   border: 1px solid #555080;
   border-radius: 3px;
-  font-size: 11px;
-  padding: 1px 6px;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.fx-chip:hover { background: #4a4468; }
+.fx-rack-btn:hover { background: #4a4468; }
+.fx-badge { font-family: Consolas, monospace; font-size: 10px; color: var(--dim); }
+.fx-badge.on { color: #cfe0ff; }
 
 #fx-panel {
   position: fixed;
   z-index: 20;
-  width: 240px;
-  max-height: 70vh;
+  width: 280px;
+  max-height: 80vh;
   overflow-y: auto;
   background: var(--panel2);
   border: 1px solid var(--border);
@@ -260,10 +252,90 @@ input[type="range"] { accent-color: var(--accent); }
   gap: 8px;
 }
 #fx-panel h3 { font-size: 13px; font-weight: 600; }
-#fx-panel .fx-param { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
-#fx-panel .fx-param span.val { min-width: 44px; text-align: right; font-family: Consolas, monospace; }
-#fx-panel .fx-param input { flex: 1; min-width: 0; }
 #fx-panel .fx-remove { align-self: flex-end; font-size: 11px; padding: 2px 8px; }
+
+/* ラックの10行。[LED] [スロット名] [MIXノブ] */
+.fx-slots { display: flex; flex-direction: column; gap: 2px; }
+.fx-slot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: #24242d;
+}
+.fx-slot.editing { outline: 1px solid var(--accent); }
+.fx-led {
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border-radius: 50%;
+  background: #1a1a22;
+  border: 1px solid var(--border);
+  flex: none;
+}
+.fx-led.on { background: #6fdc6f; border-color: #6fdc6f; box-shadow: 0 0 5px rgba(111, 220, 111, 0.7); }
+.fx-slot-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fx-slot.empty .fx-slot-name { color: #55555f; }
+.fx-slot-name:hover { color: #cfe0ff; }
+/* MIX ノブはラベル・数値を出さず（行が太らないように）、値はヒントバーで見せる */
+.fx-mix { flex: none; }
+.fx-mix .ok-val, .fx-mix .ok-lab { display: none; }
+
+/* エディタ（共通ノブの自動生成 or def.buildUI） */
+.fx-editor { border-top: 1px solid var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.fx-editor h4 { font-size: 12px; font-weight: 600; color: var(--text); }
+.fx-knobs { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* ---- 共通ノブ（js/knob.js）---- */
+.knob {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  user-select: none;
+  touch-action: none;
+  cursor: ns-resize;
+}
+.knob canvas { display: block; }
+.knob.dragging .ok-val { color: var(--accent); }
+/* ノブの「値を入力…」用のインライン入力（body 直下に重ねる） */
+#knob-input {
+  position: fixed;
+  z-index: 40;
+  width: 80px;
+  padding: 2px 4px;
+  font-size: 11px;
+  font-family: Consolas, monospace;
+  background: #101014;
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+}
+
+/* ---- ヒントバー（最下部固定） ---- */
+#hint-bar {
+  flex: none;
+  height: 20px;
+  line-height: 20px;
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--dim);
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* 右クリックメニュー。ストリップ（z:5〜6）や FX パネル（z:20）より手前 */
 #ctx-menu {

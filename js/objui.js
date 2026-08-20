@@ -35,6 +35,8 @@ DAW.objui = {
   SPH_HIT_PX: 15,     // ヒット判定半径(px)
 
   // ---- リミッターのノブ ----
+  // 実装は共通ノブ（js/knob.js の DAW.knob）に乗っている。KNOB_PX は DAW.knob.KNOB_PX と
+  // 同じ値（挙動の基準値としてテストが参照するためここにも残す）。
   KNOB_PX: 170,       // フルレンジぶん動かすのに必要なドラッグ量(px)
   KNOBS: [
     { key: 'gainDb', label: 'Gain', unit: 'dB', digits: 1, def: 0 },
@@ -68,7 +70,6 @@ DAW.objui = {
   drag: null,         // トップビューのドラッグ中の状態 { id, moved }
   fdrag: null,        // 正面ビューのドラッグ中の状態 { id, back, moved }
   sdrag: null,        // 3D球ビューのドラッグ中の状態 { id, near, moved }
-  kdrag: null,        // ノブのドラッグ中の状態 { key, y0, v0 }
   pdrag: null,        // 経路編集のドラッグ中の状態 { id, view, kind:'move'|'time', index, ... }
   pathEdit: false,    // 経路の編集モード（TOP VIEW ヘッダの「編集」トグル）
   pathSel: null,      // 選択中の waypoint 番号（時間チップの表示・ドラッグ対象）
@@ -159,10 +160,7 @@ DAW.objui = {
       window.addEventListener('pointercancel', e => this.onSphereUp(e));
     }
 
-    // ノブのドラッグ（RENDERER のリミッター）
-    window.addEventListener('pointermove', e => this.onKnobMove(e));
-    window.addEventListener('pointerup', e => this.onKnobUp(e));
-    window.addEventListener('pointercancel', e => this.onKnobUp(e));
+    // ノブのドラッグは共通ノブ（DAW.knob）が window で受ける
 
     this.buildRenderer();
 
@@ -1780,102 +1778,28 @@ DAW.objui = {
     });
   },
 
+  // 共通ノブ（DAW.knob）に乗せる。挙動は従来のリミッターノブと互換:
+  // 縦ドラッグ（KNOB_PX で1周）/ Ctrl・Shift で微調整 / ダブルクリックで既定値 /
+  // 表示は v.toFixed(digits)+unit（"0.0dB" 形式のまま）。
   buildKnob(spec) {
-    const el = document.createElement('div');
-    el.className = 'obj-knob';
-    el.dataset.key = spec.key;
     const r = DAW.limiter.LIMITS[spec.key];
-    el.title = `${spec.label}（${r[0]}〜${r[1]}${spec.unit}）: 上下ドラッグで変更 / Shift で微調整 / ダブルクリックで既定値`;
-    const cv = document.createElement('canvas');
-    cv.width = 48 * (window.devicePixelRatio || 1);
-    cv.height = 48 * (window.devicePixelRatio || 1);
-    const val = document.createElement('div');
-    val.className = 'ok-val';
-    const lab = document.createElement('div');
-    lab.className = 'ok-lab';
-    lab.textContent = spec.label;
-    el.append(cv, val, lab);
-    el.addEventListener('pointerdown', ev => this.onKnobDown(ev, spec));
-    el.addEventListener('dblclick', () => {
-      DAW.limiter.set(spec.key, spec.def);
-      this.renderRenderer();
+    const el = DAW.knob.create({
+      label: spec.label,
+      range: { min: r[0], max: r[1] },   // step 無し = 連続値（従来のドラッグ解像度を維持）
+      def: spec.def,
+      get: () => DAW.limiter.params[spec.key],
+      set: v => { DAW.limiter.set(spec.key, v); this.renderRenderer(); },
+      // リミッターの設定はプロジェクト状態（履歴のスナップショット）に入っていないので
+      // commit は何もしない。入るようになったらここで DAW.history.commit() を呼ぶ。
+      commit: () => {},
+      format: v => v.toFixed(spec.digits) + spec.unit,
+      active: () => DAW.limiter.enabled,
     });
-    el._r = { canvas: cv, val, spec };
+    el.classList.add('obj-knob');
+    el.dataset.key = spec.key;
+    el.title = `${spec.label}（${r[0]}〜${r[1]}${spec.unit}）: 上下ドラッグで変更 / Ctrl か Shift で微調整 / ダブルクリックで既定値`;
     this.knobs.set(spec.key, el);
     return el;
-  },
-
-  onKnobDown(e, spec) {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    this.kdrag = { key: spec.key, y0: e.clientY, v0: DAW.limiter.params[spec.key] };
-    this.knobs.get(spec.key).classList.add('dragging');
-    try { this.knobs.get(spec.key).setPointerCapture(e.pointerId); } catch (err) { /* 合成イベント */ }
-  },
-
-  onKnobMove(e) {
-    const d = this.kdrag;
-    if (!d) return;
-    const r = DAW.limiter.LIMITS[d.key];
-    const span = (r[1] - r[0]) / this.KNOB_PX;         // 1px あたりの変化量
-    const fine = e.shiftKey ? 0.2 : 1;                 // Shift で微調整
-    // 上へドラッグ = 増加。範囲外は DAW.limiter.set() が丸める。
-    DAW.limiter.set(d.key, d.v0 + (d.y0 - e.clientY) * span * fine);
-    this.renderRenderer();
-  },
-
-  onKnobUp() {
-    if (!this.kdrag) return;
-    const el = this.knobs.get(this.kdrag.key);
-    if (el) el.classList.remove('dragging');
-    this.kdrag = null;
-    // リミッターの設定はプロジェクト状態（履歴のスナップショット）に入っていないので
-    // commit() は呼ばない。入るようになったらここで1回だけ呼ぶ。
-  },
-
-  drawKnob(el) {
-    const spec = el._r.spec;
-    const r = DAW.limiter.LIMITS[spec.key];
-    const v = DAW.limiter.params[spec.key];
-    const t = (v - r[0]) / (r[1] - r[0]);
-    const cv = el._r.canvas;
-    const dpr = window.devicePixelRatio || 1;
-    const want = Math.round(48 * dpr);
-    if (cv.width !== want) { cv.width = want; cv.height = want; }
-    const g2 = cv.getContext('2d');
-    g2.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g2.clearRect(0, 0, 48, 48);
-    const cx = 24;
-    const cy = 24;
-    const R = 17;
-    const A0 = Math.PI * 0.75;      // 左下から
-    const A1 = Math.PI * 2.25;      // 右下まで（270°）
-    const a = A0 + (A1 - A0) * Math.max(0, Math.min(1, t));
-    const on = DAW.limiter.enabled;
-
-    g2.lineWidth = 4;
-    g2.lineCap = 'round';
-    g2.strokeStyle = '#2a2a34';
-    g2.beginPath();
-    g2.arc(cx, cy, R, A0, A1);
-    g2.stroke();
-    g2.strokeStyle = on ? '#4f8cff' : '#5a5a66';
-    g2.beginPath();
-    g2.arc(cx, cy, R, A0, a);
-    g2.stroke();
-
-    g2.fillStyle = '#191922';
-    g2.beginPath();
-    g2.arc(cx, cy, R - 4, 0, Math.PI * 2);
-    g2.fill();
-    g2.strokeStyle = on ? '#8fb6ff' : '#7a7a88';
-    g2.lineWidth = 2;
-    g2.beginPath();
-    g2.moveTo(cx + Math.cos(a) * (R - 10), cy + Math.sin(a) * (R - 10));
-    g2.lineTo(cx + Math.cos(a) * (R - 3), cy + Math.sin(a) * (R - 3));
-    g2.stroke();
-
-    el._r.val.textContent = v.toFixed(spec.digits) + spec.unit;
   },
 
   renderRenderer() {
@@ -1889,7 +1813,7 @@ DAW.objui = {
       const cur = this.outMode();
       for (const b of e.out.children) b.classList.toggle('on', b.dataset.out === cur);
     }
-    for (const el of this.knobs.values()) this.drawKnob(el);
+    for (const el of this.knobs.values()) el.update();
     e.limByp.classList.toggle('on', !DAW.limiter.enabled);
     e.limByp.textContent = DAW.limiter.enabled ? 'BYPASS' : 'BYPASSED';
 

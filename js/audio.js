@@ -112,21 +112,12 @@ DAW.audio = {
     });
   },
 
-  // gain -> fx... -> panner を接続し、FXインスタンス配列を返す。
+  // gain -> [FXスロット]... -> panner を接続し、スロット配列を返す。
   // ライブ/オフライン両方の ctx で使う（エクスポートからも呼ばれる）。
+  // 中身はラッパー層（js/wrapper.js）へ委譲。スロットは旧インスタンスと同じ
+  // input/output/set を持つので、既存の呼び出し側・後始末コードはそのまま。
   connectChain(ctx, track, gain, panner) {
-    let prev = gain;
-    const instances = [];
-    for (const fx of track.effects) {
-      const def = DAW.plugins.get(fx.pluginId);
-      if (!def) continue;
-      const inst = def.create(ctx, fx.params);
-      prev.connect(inst.input);
-      prev = inst.output;
-      instances.push(inst);
-    }
-    prev.connect(panner);
-    return instances;
+    return DAW.wrapper.buildChain(ctx, track, gain, panner);
   },
 
   // トラックの出力先を返す。オブジェクトに割り当てられていればオブジェクトパンナーの入口、
@@ -192,7 +183,26 @@ DAW.audio = {
     if (!fx) return;
     fx.params[key] = value;
     const n = this.trackNodes.get(track.id);
-    if (n && n.fx[fxIndex]) n.fx[fxIndex].set(key, value);
+    if (n && n.fx[fxIndex]) n.fx[fxIndex].set(key, value);   // スロット経由でプラグインへ届く
+  },
+
+  // スロットの enable 切替。state（track.effects）とライブノードの両方へ反映する。
+  // undo は呼び出し側（FXラック UI）が commit する（setEffectParam と同じ分担）。
+  setEffectEnabled(track, fxIndex, on) {
+    const fx = track.effects[fxIndex];
+    if (!fx) return;
+    fx.enabled = !!on;
+    const n = this.trackNodes.get(track.id);
+    if (n && n.fx[fxIndex] && n.fx[fxIndex].setEnabled) n.fx[fxIndex].setEnabled(fx.enabled);
+  },
+
+  // スロットの wet（MIX）変更。0..1 に丸めて state とライブノードへ反映する。
+  setEffectWet(track, fxIndex, wet) {
+    const fx = track.effects[fxIndex];
+    if (!fx) return;
+    fx.wet = Math.max(0, Math.min(1, +wet || 0));
+    const n = this.trackNodes.get(track.id);
+    if (n && n.fx[fxIndex] && n.fx[fxIndex].setWet) n.fx[fxIndex].setWet(fx.wet);
   },
 
   updateGains() {

@@ -113,10 +113,14 @@ DAW.ui = {
     this.els.scroller.addEventListener('dragover', e => e.preventDefault());
     this.els.scroller.addEventListener('drop', e => this.onDrop(e));
 
-    // FXパネルの外側クリックで閉じる
+    // FXラック（パネル）の外側クリックで閉じる。右クリックメニューと
+    // ノブのインライン入力はラックの操作の一部なので閉じる対象にしない
     document.addEventListener('pointerdown', e => {
       const panel = document.getElementById('fx-panel');
-      if (panel && !panel.contains(e.target) && !e.target.closest('.fx-chip')) panel.remove();
+      if (panel && !panel.contains(e.target) && !e.target.closest('.fx-rack-btn')
+          && !e.target.closest('#ctx-menu') && !e.target.closest('#knob-input')) {
+        this.closeFxRack();
+      }
     });
 
     requestAnimationFrame(() => this.tick());
@@ -224,6 +228,7 @@ DAW.ui = {
     });
     this.updateDropHint();
     this.updateEditButtons();   // 選択が消えていたらボタンも無効に戻す
+    this.renderFxRack();        // ラックが開いていれば追従（undo でトラックが差し替わっても正しい実体を引く）
     this.drawRuler();
   },
 
@@ -349,104 +354,231 @@ DAW.ui = {
     return wrap;
   },
 
-  // ---- FX ----
+  // ---- FX（ラック）----
+  //
+  // トラックヘッドには「ラックを開くボタン + 使用中スロット数バッジ」だけを置き、
+  // クリックで FX ラックパネル（#fx-panel）を開く。ラックは常に 10 行
+  // [enable LED] [スロット名 or 空] [MIX ノブ] で、行クリックでそのプラグインの
+  // エディタ（共通ノブ群）を同パネル下部に展開する。
+  // パネルは既存の流儀どおり「開くたび作り直し・外側クリックで閉じる」。
+  // undo などでトラックが差し替わっても id で引き直す（renderTracks が再描画する）。
+
+  _fxRack: null,   // 開いているラック { trackId, x, y, editIndex }
 
   buildFxRow(track) {
     const row = document.createElement('div');
     row.className = 'fx-row';
-
-    const sel = document.createElement('select');
-    sel.className = 'fx-add';
-    sel.title = 'エフェクトを追加';
-    const ph = document.createElement('option');
-    ph.textContent = '＋FX';
-    ph.value = '';
-    sel.appendChild(ph);
-    for (const def of DAW.plugins.list()) {
-      const opt = document.createElement('option');
-      opt.value = def.id;
-      opt.textContent = def.name;
-      sel.appendChild(opt);
-    }
-    sel.addEventListener('change', async () => {
-      const def = DAW.plugins.get(sel.value);
-      if (!def) return;
-      track.effects.push({ pluginId: def.id, params: DAW.plugins.defaultParams(def) });
-      if (DAW.audio.ctx) {
-        if (def.prepare) await def.prepare(DAW.audio.ctx);
-        DAW.audio.rebuildTrackChain(track);
-      }
-      this.renderTracks();
-      DAW.history.commit();
-    });
-    row.appendChild(sel);
-
-    track.effects.forEach((fx, i) => {
-      const def = DAW.plugins.get(fx.pluginId);
-      if (!def) return;
-      const chip = document.createElement('span');
-      chip.className = 'fx-chip';
-      chip.textContent = def.name;
-      chip.title = def.name;
-      chip.addEventListener('click', () => this.openFxPanel(track, i, chip));
-      row.appendChild(chip);
-    });
+    const btn = document.createElement('button');
+    btn.className = 'fx-rack-btn';
+    btn.title = 'FX ラックを開く';
+    const lab = document.createElement('span');
+    lab.textContent = 'FX';
+    const badge = document.createElement('span');
+    badge.className = 'fx-badge' + (track.effects.length ? ' on' : '');
+    badge.textContent = `${track.effects.length}/${DAW.wrapper.MAX_SLOTS}`;
+    btn.append(lab, badge);
+    btn.addEventListener('click', () => this.openFxRack(track.id, btn));
+    row.appendChild(btn);
     return row;
   },
 
-  openFxPanel(track, fxIndex, anchor) {
+  openFxRack(trackId, anchor) {
+    const r = anchor.getBoundingClientRect();
+    this._fxRack = { trackId, x: r.left, y: r.bottom + 6, editIndex: null };
+    this.renderFxRack();
+  },
+
+  closeFxRack() {
+    const p = document.getElementById('fx-panel');
+    if (p) p.remove();
+    this._fxRack = null;
+  },
+
+  // ラックの再描画。track は毎回 id で引く（undo で実体が差し替わるため）
+  renderFxRack() {
+    const st = this._fxRack;
+    if (!st) return;
     const old = document.getElementById('fx-panel');
     if (old) old.remove();
-    const fx = track.effects[fxIndex];
-    const def = DAW.plugins.get(fx.pluginId);
-    if (!def) return;
+    const track = DAW.project.tracks.find(t => t.id === st.trackId);
+    if (!track) { this._fxRack = null; return; }
+    if (st.editIndex != null && !track.effects[st.editIndex]) st.editIndex = null;
 
     const panel = document.createElement('div');
     panel.id = 'fx-panel';
     const h = document.createElement('h3');
-    h.textContent = def.name;
+    h.textContent = `FX — ${track.name}`;
     panel.appendChild(h);
 
-    for (const p of def.params) {
-      const rowEl = document.createElement('div');
-      rowEl.className = 'fx-param';
-      const label = document.createElement('span');
-      label.textContent = p.label;
-      const input = document.createElement('input');
-      input.type = 'range';
-      input.min = p.min; input.max = p.max; input.step = p.step;
-      input.value = fx.params[p.key];
-      const val = document.createElement('span');
-      val.className = 'val';
-      val.textContent = (+fx.params[p.key]).toFixed(2);
-      input.addEventListener('input', () => {
-        const v = +input.value;
-        val.textContent = v.toFixed(2);
-        DAW.audio.setEffectParam(track, fxIndex, p.key, v);
+    const rows = document.createElement('div');
+    rows.className = 'fx-slots';
+    for (let i = 0; i < DAW.wrapper.MAX_SLOTS; i++) rows.appendChild(this.buildFxSlotRow(track, i));
+    panel.appendChild(rows);
+
+    if (st.editIndex != null) panel.appendChild(this.buildFxEditor(track, st.editIndex));
+
+    document.body.appendChild(panel);
+    panel.style.left = Math.max(4, Math.min(st.x, window.innerWidth - panel.offsetWidth - 10)) + 'px';
+    panel.style.top = Math.max(4, Math.min(st.y, window.innerHeight - panel.offsetHeight - 10)) + 'px';
+  },
+
+  buildFxSlotRow(track, i) {
+    const st = this._fxRack;
+    const fx = track.effects[i];
+    const def = fx && DAW.plugins.get(fx.pluginId);
+    const row = document.createElement('div');
+    row.className = 'fx-slot' + (fx ? '' : ' empty') + (st.editIndex === i ? ' editing' : '');
+
+    // enable LED。切替はライブノードへ即反映し、1クリック = undo 1エントリ
+    const led = document.createElement('button');
+    led.className = 'fx-led' + (fx && fx.enabled !== false ? ' on' : '');
+    led.title = 'スロットの有効/無効';
+    led.disabled = !fx;
+    led.addEventListener('click', e => {
+      e.stopPropagation();
+      if (!fx) return;
+      DAW.audio.setEffectEnabled(track, i, fx.enabled === false);
+      led.classList.toggle('on', fx.enabled !== false);
+      DAW.history.commit();
+    });
+
+    // スロット名。空スロットはクリックでプラグイン選択（既存の showMenu を流用）
+    const name = document.createElement('span');
+    name.className = 'fx-slot-name';
+    name.textContent = def ? def.name : (fx ? fx.pluginId : '---');
+    name.title = def ? `${def.name} のエディタを開閉` : 'クリックでプラグインを選択';
+    name.addEventListener('click', e => {
+      if (!fx) { this.openFxAddMenu(e, track); return; }
+      st.editIndex = st.editIndex === i ? null : i;
+      this.renderFxRack();
+    });
+    if (fx) {
+      name.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.showMenu(e.clientX, e.clientY, [
+          { label: 'このFXを削除', run: () => this.removeFxSlot(track, i) },
+        ]);
       });
-      input.addEventListener('change', () => DAW.history.commit());
-      rowEl.append(label, input, val);
-      panel.appendChild(rowEl);
+    }
+    row.append(led, name);
+
+    // MIX ノブ（wet）。set は音だけ / commit は pointerup で1回（undo 粒度は input/change と同じ）
+    if (fx) {
+      const knob = DAW.knob.create({
+        label: 'MIX',
+        size: 26,
+        range: { min: 0, max: 1, step: 0.01 },
+        def: 1,
+        get: () => (fx.wet == null ? 1 : fx.wet),
+        set: v => DAW.audio.setEffectWet(track, i, v),
+        commit: () => DAW.history.commit(),
+        format: v => Math.round(v * 100) + '%',
+      });
+      knob.classList.add('fx-mix');
+      knob.title = 'MIX（原音とのバランス）: ドラッグで変更 / ダブルクリックで100%';
+      row.appendChild(knob);
+    }
+    return row;
+  },
+
+  // 空スロットのクリック: プラグイン選択メニュー。effects は稠密配列なので追加は常に末尾へ
+  openFxAddMenu(e, track) {
+    if (track.effects.length >= DAW.wrapper.MAX_SLOTS) return;
+    this.showMenu(e.clientX, e.clientY, DAW.plugins.list().map(def => ({
+      label: def.name,
+      run: () => this.addFxSlot(track, def),
+    })));
+  },
+
+  async addFxSlot(track, def) {
+    if (track.effects.length >= DAW.wrapper.MAX_SLOTS) return;
+    track.effects.push({ pluginId: def.id, params: DAW.plugins.defaultParams(def), enabled: true, wet: 1 });
+    if (DAW.audio.ctx) {
+      if (def.prepare) await def.prepare(DAW.audio.ctx);
+      DAW.audio.rebuildTrackChain(track);
+    }
+    if (this._fxRack) this._fxRack.editIndex = track.effects.length - 1;
+    this.renderTracks();   // バッジ更新（ラックが開いていれば renderTracks 内で描き直す）
+    DAW.history.commit();
+  },
+
+  removeFxSlot(track, i) {
+    if (!track.effects[i]) return;
+    track.effects.splice(i, 1);
+    if (DAW.audio.ctx) DAW.audio.rebuildTrackChain(track);
+    if (this._fxRack) {
+      if (this._fxRack.editIndex === i) this._fxRack.editIndex = null;
+      else if (this._fxRack.editIndex > i) this._fxRack.editIndex--;
+    }
+    this.renderTracks();
+    DAW.history.commit();
+  },
+
+  // スロットのエディタ。def.buildUI があればそれを呼び、無ければ共通ノブを自動生成する。
+  // カスタムエディタ契約（フェーズ1では定義のみ。実装プラグインはまだ無い）:
+  //   def.buildUI(container, inst, host)
+  //     inst: ライブ再生中のインスタンス（未生成なら null）
+  //     host: { track, index, get(key), set(key,v)（音のみ）, commit(), formatValue(key,v) }
+  buildFxEditor(track, i) {
+    const fx = track.effects[i];
+    const def = DAW.plugins.get(fx.pluginId);
+    const box = document.createElement('div');
+    box.className = 'fx-editor';
+    if (!def) return box;
+    const title = document.createElement('h4');
+    title.textContent = def.name;
+    box.appendChild(title);
+
+    const host = {
+      track,
+      index: i,
+      get: key => fx.params[key],
+      set: (key, v) => DAW.audio.setEffectParam(track, i, key, v),
+      commit: () => DAW.history.commit(),
+      formatValue: (key, v) => DAW.wrapper.formatValue(def, key, v),
+    };
+    if (def.buildUI) {
+      const n = DAW.audio.trackNodes.get(track.id);
+      def.buildUI(box, (n && n.fx[i] && n.fx[i].inst) || null, host);
+    } else {
+      const knobs = document.createElement('div');
+      knobs.className = 'fx-knobs';
+      for (const p of def.params) {
+        knobs.appendChild(DAW.knob.create({
+          label: p.label,
+          size: 40,
+          range: { min: p.min, max: p.max, step: p.step, curve: p.curve },
+          def: p.default,
+          get: () => fx.params[p.key],
+          set: v => host.set(p.key, v),
+          commit: host.commit,
+          // ヒントバー・ノブ・値入力で必ず同じ文字列（wrapper.formatValue）を使う
+          format: v => DAW.wrapper.formatValue(def, p.key, v),
+        }));
+      }
+      box.appendChild(knobs);
     }
 
     const remove = document.createElement('button');
     remove.className = 'fx-remove';
     remove.textContent = 'このFXを削除';
-    remove.addEventListener('click', () => {
-      track.effects.splice(fxIndex, 1);
-      if (DAW.audio.ctx) DAW.audio.rebuildTrackChain(track);
-      panel.remove();
-      this.renderTracks();
-      DAW.history.commit();
-    });
-    panel.appendChild(remove);
+    remove.addEventListener('click', () => this.removeFxSlot(track, i));
+    box.appendChild(remove);
+    return box;
+  },
 
-    document.body.appendChild(panel);
-    const r = anchor.getBoundingClientRect();
-    const x = Math.min(r.left, window.innerWidth - 260);
-    const y = Math.min(r.bottom + 6, window.innerHeight - panel.offsetHeight - 10);
-    panel.style.left = Math.max(4, x) + 'px';
-    panel.style.top = Math.max(4, y) + 'px';
+  // ---- ヒントバー ----
+  // ノブの hover / ドラッグ中に「パラメータ名: 現在値（単位付き）」を出す。
+  // 文字列は wrapper.formatValue（ノブの format）と同一のものが渡ってくる。
+
+  setHint(text) {
+    const el = document.getElementById('hint-bar');
+    if (el) el.textContent = text || '';
+  },
+
+  clearHint() {
+    this.setHint('');
   },
 
   // ---- clips ----

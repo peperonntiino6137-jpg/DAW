@@ -93,6 +93,55 @@ T('[BENCH] 性能計測', async () => {
 });
 
 // =====================================================================
+// FXラッパー層（フェーズ1）の負荷。20トラック × 10スロット = 200スロットの
+// チェーン構築（ライブ）と書き出し（オフライン）を測る。
+// =====================================================================
+T('[BENCH] FXラッパー 20tr×10slot', async () => {
+  const B = (name, cond, detail) => {
+    H.tests.push({ name: '[BENCH] ' + name, pass: !!cond, detail: detail === undefined ? '' : String(detail) });
+  };
+  const t = f => { const s = performance.now(); f(); return performance.now() - s; };
+  const ta = async f => { const s = performance.now(); await f(); return performance.now() - s; };
+  const n0 = H.tests.length;
+  try { DAW.audio.stop(); } catch (e) {}
+  DAW.audio.resetNodes();
+  DAW.project.tracks = [];
+  DAW.history.reset();
+  const ctx = DAW.audio.ensureCtx();
+  const SR = ctx.sampleRate;
+  const buf = ctx.createBuffer(2, SR * 2, SR);
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < d.length; i++) d[i] = 0.3 * Math.sin(2 * Math.PI * 220 * i / SR);
+  }
+  const bid = DAW.registerBuffer(buf);
+  const lp = DAW.plugins.get('lowpass');
+  for (let i = 0; i < 20; i++) {
+    const tr = DAW.addTrack('FX' + i);
+    tr.clips.push({ id: DAW.uid(), bufferId: bid, startTime: 0, offset: 0, duration: 2, name: 'c' });
+    for (let s = 0; s < DAW.wrapper.MAX_SLOTS; s++) {
+      tr.effects.push({ pluginId: 'lowpass', params: DAW.plugins.defaultParams(lp), enabled: s % 2 === 0, wet: 0.8 });
+    }
+  }
+  const tBuild = t(() => { for (const tr of DAW.project.tracks) DAW.audio.getTrackNodes(tr); });
+  B('FW.1 ライブチェーン構築 20tr×10slot（200スロット）', tBuild < 1000, tBuild.toFixed(1) + 'ms');
+  DAW.audio.resetNodes();
+  DAW.wav.download = () => {};
+  window.confirm = () => true;
+  const tExport = await ta(async () => { await DAW.wav.exportMix(); });
+  B('FW.2 書き出し（200スロット経由）', true,
+    tExport.toFixed(0) + 'ms で ' + DAW.projectDuration().toFixed(1) + '秒 = 実時間の '
+    + (DAW.projectDuration() * 1000 / tExport).toFixed(1) + '倍速');
+  DAW.project.tracks = [];
+  DAW.audio.resetNodes();
+  DAW.ui.renderTracks();
+  const added = H.tests.slice(n0);
+  const failed = added.filter(x => !x.pass).length;
+  if (failed) throw new Error(`${failed}/${added.length} 件が目標値を超過`);
+  return `${added.length} 項目を計測`;
+});
+
+// =====================================================================
 // オブジェクトベース音響の負荷計測（受け入れ条件6）。
 // 128オブジェクト時の描画・音声の負荷を測る。
 // =====================================================================

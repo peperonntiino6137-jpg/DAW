@@ -206,6 +206,10 @@ DAW.wav = {
         const def = DAW.plugins.get(fx.pluginId);
         if (!def) { missing.add(fx.pluginId); return false; }
         fx.params = Object.assign(DAW.plugins.defaultParams(def), fx.params);
+        // 旧形式（enabled/wet フィールド欠落）は「有効・原音なし」の従来挙動に補完する。
+        // 追加フィールドのみなので保存フォーマットは version:1 のまま互換。
+        if (fx.enabled === undefined) fx.enabled = true;
+        if (fx.wet === undefined) fx.wet = 1;
         return true;
       });
     }
