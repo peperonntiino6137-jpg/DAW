@@ -8,3 +8,4 @@ test/last-result.json
 # 作業者ごとのローカル指示（共有しない）
 CLAUDE.local.md
 __pycache__/
+.claude/
