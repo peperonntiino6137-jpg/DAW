@@ -122,6 +122,7 @@ DAW.objui = {
       mdb: $('obj-mdb'),
       layouts: $('obj-layouts'),
       spkList: $('obj-spk-list'),
+      chMeters: $('obj-chmeters'),
       knobs: $('obj-knobs'),
       revKnobs: $('obj-rev-knobs'),
       limByp: $('obj-lim-byp'),
@@ -316,6 +317,38 @@ DAW.objui = {
     };
   },
 
+  // ---- ピーク連動発光 ----
+  //
+  // 再生中、鳴っているオブジェクトの点をピークに応じて光らせる（3ビュー共通）。
+  // 値は updateMeters が 30fps で貯める peaks（線形）を読むだけ（描画のたびに解析しない）。
+  // -60dB → 0、0dB → 1 の線形マップ。再生中でなければ常に 0（発光なし = 従来の見た目）。
+  GLOW_FLOOR_DB: -60,
+
+  glowOf(objId) {
+    if (!DAW.audio.isPlaying()) return 0;
+    const p = this.peaks.get(objId) || 0;
+    if (!(p > 0)) return 0;
+    const db = 20 * Math.log10(p);
+    return Math.max(0, Math.min(1, 1 - db / this.GLOW_FLOOR_DB));
+  },
+
+  // 点の背後に加算合成のハロを描く（glow=0 なら何もしない）。半径はピークで伸びる
+  drawGlow(g2, x, y, r, color, glow) {
+    if (!(glow > 0)) return;
+    const R = r + 3 + 10 * glow;
+    const grad = g2.createRadialGradient(x, y, r * 0.3, x, y, R);
+    grad.addColorStop(0, color);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    g2.save();
+    g2.globalCompositeOperation = 'lighter';   // 加算 = 発光
+    g2.globalAlpha = 0.55 * glow;
+    g2.fillStyle = grad;
+    g2.beginPath();
+    g2.arc(x, y, R, 0, Math.PI * 2);
+    g2.fill();
+    g2.restore();
+  },
+
   // 点の大きさ・明るさで elevation を示す（真上からの図には高さが出せないため）
   dotRadius(el) { return 4.5 + 3.5 * ((el + 90) / 180); },
   // el は表示位置の仰角（経路が動かすので obj.el と別に渡せる。省略時は obj.el）
@@ -414,7 +447,9 @@ DAW.objui = {
     const pos = this.dispPos(obj);
     const p = this.posToXY(pos.az, pos.dist, g);
     const r = this.dotRadius(pos.el);
-    g2.globalAlpha = this.dotAlpha(obj, pos.el);
+    const glow = this.glowOf(obj.id);   // 再生中はピークに応じて発光（明るさ + ハロ）
+    this.drawGlow(g2, p.x, p.y, r, obj.color, glow);
+    g2.globalAlpha = Math.min(1, this.dotAlpha(obj, pos.el) + 0.35 * glow);
     g2.fillStyle = obj.color;
     g2.beginPath();
     g2.arc(p.x, p.y, r, 0, Math.PI * 2);
@@ -919,7 +954,9 @@ DAW.objui = {
   drawFrontObject(g2, obj, p, isSel) {
     const r = p.back ? 4.5 : 6;   // 後方は少し小さく描いて前後を区別する
     const on = DAW.objects.effectiveGain(obj) > 0;   // ミュート/他がソロ中は薄く
-    g2.globalAlpha = (on ? 1 : 0.3) * (p.back ? 0.55 : 1);
+    const glow = this.glowOf(obj.id);   // 再生中はピークに応じて発光（トップビューと同じ）
+    this.drawGlow(g2, p.x, p.y, r, obj.color, glow * (p.back ? 0.55 : 1));
+    g2.globalAlpha = Math.min(1, (on ? 1 : 0.3) * (p.back ? 0.55 : 1) + 0.35 * glow);
     g2.fillStyle = obj.color;
     g2.beginPath();
     g2.arc(p.x, p.y, r, 0, Math.PI * 2);
@@ -1295,7 +1332,9 @@ DAW.objui = {
   drawSphereObject(g2, obj, p, g, isSel, pos) {
     const behind = p.depth > g.cam.D;
     const r = Math.max(3, 6 * (g.cam.D / Math.max(0.2, p.depth)));
-    g2.globalAlpha = this.dotAlpha(obj, pos ? pos.el : null) * (behind ? 0.65 : 1);
+    const glow = this.glowOf(obj.id);   // 再生中はピークに応じて発光（他ビューと同じ）
+    this.drawGlow(g2, p.x, p.y, r, obj.color, glow * (behind ? 0.65 : 1));
+    g2.globalAlpha = Math.min(1, this.dotAlpha(obj, pos ? pos.el : null) * (behind ? 0.65 : 1) + 0.35 * glow);
     g2.fillStyle = obj.color;
     g2.beginPath();
     g2.arc(p.x, p.y, r, 0, Math.PI * 2);
@@ -1714,7 +1753,15 @@ DAW.objui = {
       if (peak) this.setPeak(id, this.dbToLinear(DAW.objaudio.peakDb(id)));
       this.syncPeak(el, id);
     }
+    // 再生中はビューの発光（glowOf）用に、ストリップ外のオブジェクトのピークも読む。
+    // 停止中は従来どおり可視ストリップのみ（128個ぶんの常時解析を避ける既存方針のまま）。
+    if (peak && DAW.audio.isPlaying()) {
+      for (const obj of DAW.objects.list) {
+        if (!this.strips.has(obj.id)) this.setPeak(obj.id, this.dbToLinear(DAW.objaudio.peakDb(obj.id)));
+      }
+    }
     this.updateMasterMeter();
+    this.updateChMeters();   // RENDERER の ch 別出力メーター（隠れていれば no-op）
     if (this.view === 'metering') this.updateLoudness();   // ラウドネスも同じ 30fps で
     // トラックヘッダのバッジもここで貼り直す。renderTracks() は state を変えずに
     // DOM を作り直すことがある（リサイズ・ズーム等）ので、署名同期だけでは拾えない。
@@ -1988,6 +2035,50 @@ DAW.objui = {
     if (r.report.textContent !== txt) r.report.textContent = txt;
   },
 
+  // ---- ch 別出力メーター（RENDERER）----
+  //
+  // 本数はレイアウトの ch 数から可変で生成する（配置を増やしてもここは変えない）。
+  // スピーカー出力時は配置の各 ch（並び = WAV のチャンネル順）、バイノーラル時は L/R の2本。
+  // 値は DAW.audio.getChannelLevels() = masterGain 直後 = リミッター前のタップ（既存規約）。
+
+  // メーターのラベル列（= 本数の定義。テストからも参照する）
+  chMeterNames() {
+    return this.outMode() === 'speakers' ? this.speakers().map(s => s.name) : ['L', 'R'];
+  },
+
+  // バーの DOM を（本数が変わったときだけ）作り直す。renderRenderer から呼ばれる
+  renderChMeters() {
+    const e = this.els;
+    if (!e.chMeters) return;
+    const names = this.chMeterNames();
+    const sig = this.outMode() + ':' + this.layoutName + ':' + names.join(',');
+    if (e.chMeters._sig === sig) return;
+    e.chMeters._sig = sig;
+    e.chMeters.textContent = '';
+    e.chMeters._bars = names.map(name => {
+      const col = document.createElement('div');
+      col.className = 'obj-chm';
+      const bar = document.createElement('div');
+      bar.className = 'obj-chm-bar';
+      const fill = document.createElement('i');
+      bar.appendChild(fill);
+      const lab = document.createElement('span');
+      lab.textContent = name;
+      col.append(bar, lab);
+      e.chMeters.appendChild(col);
+      return fill;
+    });
+  },
+
+  // 値の流し込み（30fps の updateMeters から。RENDERER が隠れている間は読まない = 負荷ゼロ）
+  updateChMeters() {
+    const e = this.els;
+    if (this.view !== 'renderer' || !e.chMeters || !e.chMeters._bars) return;
+    const bars = e.chMeters._bars;
+    const lv = DAW.audio.getChannelLevels ? DAW.audio.getChannelLevels(bars.length) : [];
+    for (let i = 0; i < bars.length; i++) bars[i].style.height = this.meterPct(lv[i] || 0) + '%';
+  },
+
   renderRenderer() {
     const e = this.els;
     if (!e.layouts || this.view !== 'renderer') return;   // 隠れている間は描かない
@@ -2002,6 +2093,7 @@ DAW.objui = {
     for (const el of this.knobs.values()) el.update();
     e.limByp.classList.toggle('on', !DAW.limiter.enabled);
     e.limByp.textContent = DAW.limiter.enabled ? 'BYPASS' : 'BYPASSED';
+    this.renderChMeters();   // ch 別出力メーター（本数は配置/出力形式に追従）
 
     // スピーカー表。3D ビューに重ねた番号と同じ順（＝出力チャンネル順）で出す。
     const list = this.speakers();
@@ -2080,14 +2172,16 @@ DAW.objui = {
   tick(now) {
     this.sync();
     DAW.objaudio.followPaths();   // 経路のライブ追従（再生中でなければ no-op）
-    // 経路上を動くオブジェクトの現在位置を追う。canvas だけ描き直す
-    // （ストリップは値が変わらないので触らない。触ると入力中の欄と衝突する）
-    if (DAW.audio.isPlaying() && DAW.objects.list.some(o => o.path && o.path.enabled && o.path.points.length)) {
+    const metered = this.updateMeters(now || 0);
+    // 再生中は canvas だけ描き直す（ストリップは値が変わらないので触らない。
+    // 触ると入力中の欄と衝突する）。経路で動くオブジェクトがあれば毎フレーム、
+    // それ以外はピーク発光の更新（30fps）に合わせて間引く。
+    if (DAW.audio.isPlaying()
+        && (metered || DAW.objects.list.some(o => o.path && o.path.enabled && o.path.points.length))) {
       this.drawTop();
       this.drawFront();
       this.drawSphere();
     }
-    this.updateMeters(now || 0);
     requestAnimationFrame(t => this.tick(t));
   },
 };

@@ -18,6 +18,10 @@ DAW.objaudio = {
   // スピーカー配置（ADM 準拠の az/el）。並び順はそのまま WAV のチャンネル順になる
   // （5.1 は L, R, C, LFE, Ls, Rs の標準順）。
   LAYOUTS: {
+    '2.0': [
+      { name: 'L', az: 30, el: 0 },
+      { name: 'R', az: -30, el: 0 },
+    ],
     '5.1': [
       { name: 'L', az: 30, el: 0 },
       { name: 'R', az: -30, el: 0 },
@@ -39,6 +43,24 @@ DAW.objaudio = {
       { name: 'Rtf', az: -45, el: 45 },
       { name: 'Ltr', az: 135, el: 45 },
       { name: 'Rtr', az: -135, el: 45 },
+    ],
+    // 13ch（WalkMix リファレンス互換）: 耳高5本 + 上層(+30°)5本 + 下層(-20°)3本。LFE なし。
+    // 上層は耳高と同じ方位、下層は前方3本。下層があるので el<0 も実際に定位できる
+    // （vbapGains の N 層一般化が前提。2層時代の el<0 → 0 クランプでは鳴らない）。
+    '5.0.5.3': [
+      { name: 'L', az: 30, el: 0 },
+      { name: 'R', az: -30, el: 0 },
+      { name: 'C', az: 0, el: 0 },
+      { name: 'Ls', az: 110, el: 0 },
+      { name: 'Rs', az: -110, el: 0 },
+      { name: 'Lt', az: 30, el: 30 },
+      { name: 'Rt', az: -30, el: 30 },
+      { name: 'Ct', az: 0, el: 30 },
+      { name: 'Lst', az: 110, el: 30 },
+      { name: 'Rst', az: -110, el: 30 },
+      { name: 'Lb', az: 30, el: -20 },
+      { name: 'Rb', az: -30, el: -20 },
+      { name: 'Cb', az: 0, el: -20 },
     ],
   },
   layoutName: '5.1',
@@ -294,25 +316,52 @@ DAW.objaudio = {
     return g;
   },
 
-  // オブジェクト位置 → 各スピーカーのゲイン配列（配置の並び順）。パワー和は 1。
-  vbapGains(az, el, layout) {
-    const spk = layout.filter(s => !s.lfe);
-    const upper = spk.filter(s => s.el >= 25);
-    const horiz = spk.filter(s => s.el < 25);
-    const gains = new Map();
+  _layerCache: new WeakMap(),   // layout 配列 -> 層分割（毎回のソートを避ける。bakePath で多数回呼ぶため）
 
+  // 配置を仰角の層に分ける（LFE 除外・仰角の低い順）。仰角差が 10° 未満の連なりを同じ層とみなす。
+  // 5.1 は1層(0°)、7.1.4 は2層(0°/45°)、5.0.5.3 は3層(-20°/0°/+30°)になる。
+  // 層の代表仰角 el は所属スピーカーの平均（7.1.4 の従来値 0°/45° と一致し、既存出力を変えない）。
+  vbapLayers(layout) {
+    let layers = this._layerCache.get(layout);
+    if (layers) return layers;
+    const spk = layout.filter(s => !s.lfe).sort((a, b) => a.el - b.el);
+    layers = [];
+    for (const s of spk) {
+      const last = layers[layers.length - 1];
+      if (last && s.el - last.spk[last.spk.length - 1].el < 10) last.spk.push(s);
+      else layers.push({ spk: [s] });
+    }
+    for (const L of layers) L.el = L.spk.reduce((a, s) => a + s.el, 0) / L.spk.length;
+    this._layerCache.set(layout, layers);
+    return layers;
+  },
+
+  // オブジェクト位置 → 各スピーカーのゲイン配列（配置の並び順）。パワー和は 1。
+  // 層数非依存: el を挟む隣接2層を等パワークロスフェードし、層内は layerGains のペア VBAP。
+  // 範囲外の el は端の層へクランプする（5.1 のように1層なら仰角は表現できず水平面へ落ちる。
+  // 2層の 7.1.4 では従来の「水平0° 〜 上層45°」の式と厳密に同じ値になる = 回帰なし）。
+  vbapGains(az, el, layout) {
+    const layers = this.vbapLayers(layout);
+    const gains = new Map();
     const addAll = (m, w) => {
       for (const [s, v] of m) gains.set(s, (gains.get(s) || 0) + v * w);
     };
-    if (!upper.length) {
-      // 上層が無い配置（5.1 など）は水平面へ落とす（仰角は表現できない）
-      addAll(this.layerGains(az, horiz), 1);
+    // el を挟む隣接ペア [lo, hi] を探す（下に外れたら最下層のみ、上に外れたら最上層のみ）
+    let lo = layers[0], hi = layers[layers.length - 1];
+    if (el <= lo.el) hi = lo;
+    else if (el >= hi.el) lo = hi;
+    else {
+      for (let i = 0; i < layers.length - 1; i++) {
+        if (el >= layers[i].el && el <= layers[i + 1].el) { lo = layers[i]; hi = layers[i + 1]; break; }
+      }
+    }
+    if (lo === hi) {
+      addAll(this.layerGains(az, lo.spk), 1);
     } else {
-      const elUp = upper.reduce((a, s) => a + s.el, 0) / upper.length;
-      const t = Math.min(1, Math.max(0, el / elUp));     // 0 = 水平、1 = 上層
+      const t = (el - lo.el) / (hi.el - lo.el);          // 0 = 下の層、1 = 上の層
       const ang = t * Math.PI / 2;
-      addAll(this.layerGains(az, horiz), Math.cos(ang));
-      addAll(this.layerGains(az, upper), Math.sin(ang));
+      addAll(this.layerGains(az, lo.spk), Math.cos(ang));
+      addAll(this.layerGains(az, hi.spk), Math.sin(ang));
     }
     // パワー正規化（層間クロスフェードで誤差が出ても 1 に揃える）
     let sum = 0;

@@ -42,6 +42,19 @@ DAW.loudness = {
   weightsFor(nch) {
     if (nch === 6) return [1, 1, 1, 0, 1.41, 1.41];
     if (nch === 12) return [1, 1, 1, 0, 1.41, 1.41, 1, 1, 1, 1, 1, 1];
+    // 上記以外の ch 数は配置定義（LAYOUTS が正）から同じ規則で導出する:
+    // LFE=0、耳高層（|el|<25）かつ |az| 60〜120° = 1.41、それ以外 1。
+    // 2ch（±30°）は全部 1、13ch（5.0.5.3）は Ls/Rs(±110°) だけ 1.41 になる。
+    const layouts = (typeof DAW !== 'undefined') && DAW.objaudio && DAW.objaudio.LAYOUTS;
+    if (layouts) {
+      for (const name of Object.keys(layouts)) {
+        const L = layouts[name];
+        if (L.length === nch) {
+          return L.map(s => s.lfe ? 0
+            : (Math.abs(s.el) < 25 && Math.abs(s.az) >= 60 && Math.abs(s.az) <= 120 ? 1.41 : 1));
+        }
+      }
+    }
     const w = new Array(nch);
     w.fill(1);
     return w;

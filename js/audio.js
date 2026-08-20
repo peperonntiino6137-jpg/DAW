@@ -120,6 +120,46 @@ DAW.audio = {
     });
   },
 
+  chMeter: null,   // ch 別出力メーターのタップ { n, split, analysers, buf }（RENDERER の出力メーター用）
+
+  // ch 別の瞬時ピークを長さ n の配列で返す（1.0 超 = クリップ）。
+  // タップはマスターメーターと同じ masterGain 直後 = **リミッター前**の規約
+  // （どれだけ突っ込んでいるかが見える。表示の遅延補正も不要）。
+  // 本数 n が変わったら組み直す（スピーカー配置の切り替えに追従する）。
+  // ctx が無ければ 0 埋めを返すだけ（メーターのために AudioContext を作らない）。
+  getChannelLevels(n) {
+    if (!this.ctx || !(n > 0)) return new Array(n > 0 ? n : 0).fill(0);
+    let m = this.chMeter;
+    if (!m || m.n !== n) {
+      if (m) {   // 旧タップは masterGain から切り離して捨てる（残すと処理され続ける）
+        try { this.masterGain.disconnect(m.split); } catch (e) {}
+        for (const a of m.analysers) { try { a.disconnect(); } catch (e) {} }
+        try { m.split.disconnect(); } catch (e) {}
+      }
+      // ChannelSplitter は discrete 解釈なので、2ch 再生中に 6 本へ広げても
+      // ch3 以降は無音になるだけ（勝手なアップミックスで嘘のレベルは出ない）
+      const split = this.ctx.createChannelSplitter(n);
+      this.masterGain.connect(split);
+      const analysers = [];
+      for (let i = 0; i < n; i++) {
+        const a = this.ctx.createAnalyser();
+        a.fftSize = 512;
+        split.connect(a, i);
+        analysers.push(a);
+      }
+      m = this.chMeter = { n, split, analysers, buf: new Float32Array(512) };
+    }
+    return m.analysers.map(a => {
+      a.getFloatTimeDomainData(m.buf);
+      let p = 0;
+      for (let i = 0; i < m.buf.length; i++) {
+        const v = Math.abs(m.buf[i]);
+        if (v > p) p = v;
+      }
+      return p;
+    });
+  },
+
   // gain -> [FXスロット]... -> panner を接続し、スロット配列を返す。
   // ライブ/オフライン両方の ctx で使う（エクスポートからも呼ばれる）。
   // 中身はラッパー層（js/wrapper.js）へ委譲。スロットは旧インスタンスと同じ

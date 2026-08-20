@@ -792,6 +792,27 @@ input[type="range"] { accent-color: var(--accent); }
 .obj-spk-row .sn { min-width: 28px; color: #9aa; }
 .obj-spk-row.lfe { opacity: 0.6; }
 
+/* ch 別出力メーター（RENDERER）。本数は配置の ch 数に追従する（13ch でも折り返して収まる） */
+#obj-chmeters { display: flex; gap: 4px; flex-wrap: wrap; align-items: flex-end; }
+.obj-chm { display: flex; flex-direction: column; align-items: center; gap: 2px; width: 16px; }
+.obj-chm-bar {
+  position: relative;
+  width: 8px;
+  height: 52px;
+  background: #101014;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.obj-chm-bar i {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 0%;
+  background: linear-gradient(to top, #3fae6a 0%, #3fae6a 60%, #e0c93f 85%, #ff5252 100%);
+}
+.obj-chm span { font-size: 8px; font-family: Consolas, monospace; color: #9aa; }
+#obj-chmeter-note { font-size: 10px; color: #5f5f6b; }
+
 #obj-lim-byp { padding: 1px 8px; font-size: 10px; color: var(--dim); }
 #obj-lim-byp.on { background: #b3452e; border-color: #b3452e; color: #fff; }
 #obj-lim-note { font-size: 10px; color: #5f5f6b; }

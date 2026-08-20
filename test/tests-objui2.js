@@ -406,8 +406,9 @@ objui2Suite('[32] 3D球ビュー/RENDERER/メーター', async (okf) => {
 
   {
     const btn = n => document.querySelector(`#obj-layouts .obj-layout-btn[data-layout="${n}"]`);
-    okf('W.47 配置の選択ボタンが 5.1 / 7.1.4 ぶんある',
-      !!btn('5.1') && !!btn('7.1.4') && document.querySelectorAll('#obj-layouts .obj-layout-btn').length === 2);
+    okf('W.47 配置の選択ボタンが LAYOUTS の全配置ぶんある',   // 2.0 / 5.0.5.3 追加で 4 つ（[45] 参照）
+      !!btn('5.1') && !!btn('7.1.4') && !!btn('2.0') && !!btn('5.0.5.3')
+      && document.querySelectorAll('#obj-layouts .obj-layout-btn').length === U.layoutNames().length);
     btn('7.1.4').click();
     okf('W.48 ボタンで選択中の配置が変わる', U.layoutName === '7.1.4', U.layoutName);
     okf('W.49 選択がレンダラー層（VBAP）にも伝わる',
